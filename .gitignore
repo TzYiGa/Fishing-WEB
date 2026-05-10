@@ -1,0 +1,33 @@
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+**/doc/api/
+**/ios/.symlinks/
+**/linux/flutter/generated_plugin_registrant.dart
+**/macos/flutter/generated_plugin_registrant.dart
+**/windows/flutter/generated_plugin_registrant.dart
+**/linux/flutter/generated_plugins.cmake
+**/macos/flutter/generated_plugins.cmake
+**/windows/flutter/generated_plugins.cmake
+**/linux/flutter/generated_plugin_registrant.h
+**/firebase_options.dart.local
+# FlutterFire 產出（含 Web client 設定）：勿提交；請複製 firebase_options.dart.example 或執行 flutterfire configure
+lib/firebase_options.dart
+.idea/
+*.iml
+**/Generated.xcconfig
+**/Flutter.framework
+**/Pods/
+serviceAccountKey.json
+# 本機密鑰（勿提交）：從 dart_defines.example.json 複製後改名填入
+dart_defines.json
+*.local.env
+node_modules/
+__pycache__/
+*.py[cod]
+
+# Flutter CLI 除錯產物（勿提交）
+/flutter_*.log
+/flutter_*.png

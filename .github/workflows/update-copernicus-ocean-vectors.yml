@@ -53,7 +53,12 @@ jobs:
           CMEMS_USE_COPERNICUSMARINE: "1"
           COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.CMEMS_USER }}
           COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.CMEMS_PASSWORD }}
-        run: python tool/export_copernicus_ocean_vectors.py
+        run: |
+          if [ -z "${COPERNICUSMARINE_SERVICE_USERNAME:-}" ] || [ -z "${COPERNICUSMARINE_SERVICE_PASSWORD:-}" ]; then
+            echo "::error::未設定 Repository Secrets：CMEMS_USER、CMEMS_PASSWORD（Copernicus Marine 帳密）。雲端 runner 無法使用舊 OPeNDAP，必須由此認證。"
+            exit 1
+          fi
+          python tool/export_copernicus_ocean_vectors.py
 
       - name: Commit and push if changed
         run: |
