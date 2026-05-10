@@ -25,6 +25,8 @@ serviceAccountKey.json
 dart_defines.json
 *.local.env
 node_modules/
+__pycache__/
+*.py[cod]
 
 # Flutter CLI 除錯產物（勿提交）
 /flutter_*.log

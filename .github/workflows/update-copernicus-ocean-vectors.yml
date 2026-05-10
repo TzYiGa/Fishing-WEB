@@ -1,6 +1,9 @@
-# 定期從 Copernicus Marine OPeNDAP 匯出台灣海域 uo/vo 向量 JSON，並提交回倉庫。
-# 需在 Repository secrets 設定（若 THREDDS 需登入）：
-#   CMEMS_USER、CMEMS_PASSWORD — 會寫入 ~/.netrc 供 xarray/OPeNDAP 使用
+# 定期從 Copernicus Marine 匯出台灣海域 uo/vo 向量 JSON，並提交回倉庫。
+#
+# GitHub Actions 預設走 copernicusmarine（CMEMS_USE_COPERNICUSMARINE=1），因雲端 runner
+# 對 nrt.cmems-du.eu 直連 OPeNDAP 可能收到非 NetCDF 的 HTML。
+# 請在 Repository secrets 設定：
+#   CMEMS_USER、CMEMS_PASSWORD — Copernicus Marine 帳密（傳給 copernicusmarine；並寫入 ~/.netrc 供備援）
 #
 # 排程：每日 18:00 UTC（可改 cron）。亦可於 Actions 分頁手動執行「Run workflow」。
 
@@ -22,9 +25,10 @@ jobs:
   export:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # 使用 Node 24 的 action 版本，避免 checkout@v4／setup-python@v5 的 Node 20 棄用警告
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -45,6 +49,10 @@ jobs:
           fi
 
       - name: Export vectors JSON
+        env:
+          CMEMS_USE_COPERNICUSMARINE: "1"
+          COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.CMEMS_USER }}
+          COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.CMEMS_PASSWORD }}
         run: python tool/export_copernicus_ocean_vectors.py
 
       - name: Commit and push if changed
