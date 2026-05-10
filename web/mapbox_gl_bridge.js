@@ -998,11 +998,6 @@
     const g = w.grid;
     const lngs = w.lngs;
     const lats = w.lats;
-    const plng = w.prev_lngs;
-    const plat = w.prev_lats;
-
-    plng[i] = lngs[i];
-    plat[i] = lats[i];
 
     const s0 = wfSampleUV(g, lngs[i], lats[i], tau, debugNearest);
     if (!s0.ok) {
@@ -1315,6 +1310,13 @@
           dtWall = Math.min(0.12, Math.max(0, (now - wf2.lastTs) / 1000));
         }
         wf2.lastTs = now;
+
+        // 繪製用 prev：每幀 RAF tick 只快照一次（本幀物理前）。若沿用 wfStepParticle 內每子步寫 prev，
+        // multi-substep 後 prev 只會落在「最後一小步起點」，視覺上線段極短、像不會動。
+        for (let pi = 0; pi < WF_PARTICLE_N; pi++) {
+          wf2.prev_lngs[pi] = wf2.lngs[pi];
+          wf2.prev_lats[pi] = wf2.lats[pi];
+        }
 
         // T_sim catch-up（與 RAF 解耦；render 只吃最新粒子狀態）
         wf2.simAccum += dtWall;
