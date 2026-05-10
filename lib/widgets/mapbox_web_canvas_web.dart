@@ -178,6 +178,8 @@ class _MapboxWebCanvasState extends State<MapboxWebCanvas> {
     _created = true;
     // 若先前開過底表把 handlers 設成停用，新建的 map 也會繼承全地圖停用狀態；建立後依阻擋深度同步。
     setMapboxInteractionsEnabledGlobally(true);
+    // 再走一次 fishingMapUpdate，與 create 後續任一延遲路徑（load／idle）對齊，避免僅 rely on map.on("load") 時序缺口。
+    _updateMap();
   }
 
   void _updateMap() {

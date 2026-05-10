@@ -1660,6 +1660,11 @@
       cwaData: mergedCwa,
       showCwaTide: mergedShowTide,
       showCwaBuoy: mergedShowBuoy,
+      // wfEnsureWindyFlow 讀 item.showFlowLayer／flowGeoJson／τ；未寫入時 load 內為 undefined，等同永遠關閉粒子。
+      showFlowLayer: mergedShowFlow,
+      flowGeoJsonT0: mergedFlow0,
+      flowGeoJsonT1: mergedFlow1,
+      flowDataTau: mergedTau,
     };
     maps[containerId] = item;
 
