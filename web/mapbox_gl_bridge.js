@@ -1808,6 +1808,10 @@
         source.setData(toFeatureCollection(spots));
       }
       patchMapboxFlutterPlatformViewA11y(map);
+      // 同風格 delta 也必須同步海流（否則僅 map load／換風格 idle 會跑，勾選開關永遠不會建 canvas／RAF）。
+      try {
+        wfEnsureWindyFlow(item, map);
+      } catch (_) {}
     }
 
     if (styleChanging) {
