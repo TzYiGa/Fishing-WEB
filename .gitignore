@@ -23,3 +23,7 @@ serviceAccountKey.json
 dart_defines.json
 *.local.env
 node_modules/
+
+# Flutter CLI 除錯產物（勿提交）
+/flutter_*.log
+/flutter_*.png
