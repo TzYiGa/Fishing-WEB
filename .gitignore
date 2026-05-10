@@ -13,6 +13,8 @@ build/
 **/windows/flutter/generated_plugins.cmake
 **/linux/flutter/generated_plugin_registrant.h
 **/firebase_options.dart.local
+# FlutterFire 產出（含 Web client 設定）：勿提交；請複製 firebase_options.dart.example 或執行 flutterfire configure
+lib/firebase_options.dart
 .idea/
 *.iml
 **/Generated.xcconfig
