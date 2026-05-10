@@ -1108,6 +1108,23 @@
     canvas.style.height = (mc.clientHeight || h / dpr) + "px";
   }
 
+  /**
+   * map.project() 為 CSS 像素；overlay canvas 的繪圖座標與 map.getCanvas().width/height（裝置像素）一致，
+   * 若不乘 DPR 則高解析度下粒子全擠在左上角，看起來像「沒海流」。
+   */
+  function wfMapProjectToCanvasBuffer(map, lng, lat) {
+    const p = map.project([lng, lat]);
+    const mc = map.getCanvas && map.getCanvas();
+    const cw = mc && mc.clientWidth ? mc.clientWidth : 0;
+    const ch = mc && mc.clientHeight ? mc.clientHeight : 0;
+    if (!mc || !cw || !ch || !mc.width || !mc.height) {
+      return { x: p.x, y: p.y };
+    }
+    const sx = mc.width / cw;
+    const sy = mc.height / ch;
+    return { x: p.x * sx, y: p.y * sy };
+  }
+
   function wfDrawDebugOverlays(w, item, map, ctxDbg) {
     const g = w.grid;
     const tau = wfClampTau(item.flowDataTau);
@@ -1123,7 +1140,7 @@
           const s = wfSampleUV(g, fx, fy, tau, dbgN);
           if (!s.ok) continue;
           try {
-            const p = map.project([fx, fy]);
+            const p = wfMapProjectToCanvasBuffer(map, fx, fy);
             ctxDbg.beginPath();
             ctxDbg.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
             ctxDbg.fill();
@@ -1148,8 +1165,8 @@
           const dLng = (s.u * dtArrow) / mp.mLng;
           const dLat = (s.v * dtArrow) / mp.mLat;
           try {
-            const p0 = map.project([lng, lat]);
-            const p1 = map.project([lng + dLng, lat + dLat]);
+            const p0 = wfMapProjectToCanvasBuffer(map, lng, lat);
+            const p1 = wfMapProjectToCanvasBuffer(map, lng + dLng, lat + dLat);
             ctxDbg.beginPath();
             ctxDbg.moveTo(p0.x, p0.y);
             ctxDbg.lineTo(p1.x, p1.y);
@@ -1336,6 +1353,11 @@
 
         const tracerOnly = (wf2.debugMask & WF_DBG_TRACER) !== 0;
         const dbgNearest = (wf2.debugMask & WF_DBG_NEAREST) !== 0;
+        const mcDraw = map.getCanvas && map.getCanvas();
+        const cwDraw =
+          mcDraw && mcDraw.clientWidth ? mcDraw.clientWidth : wf2.canvas.width;
+        const maxJumpBuf =
+          Math.max(wf2.canvas.width / Math.max(1, cwDraw), 1) * 600;
 
         for (let i = 0; i < WF_PARTICLE_N; i++) {
           if (tracerOnly && i !== 0) continue;
@@ -1368,11 +1390,11 @@
             ")";
 
           try {
-            const p0 = map.project([lng0, lat0]);
-            const p1 = map.project([lng1, lat1]);
+            const p0 = wfMapProjectToCanvasBuffer(map, lng0, lat0);
+            const p1 = wfMapProjectToCanvasBuffer(map, lng1, lat1);
             const dx = p1.x - p0.x;
             const dy = p1.y - p0.y;
-            if (dx * dx + dy * dy > 360000) continue;
+            if (dx * dx + dy * dy > maxJumpBuf * maxJumpBuf) continue;
             ctx.beginPath();
             ctx.moveTo(p0.x, p0.y);
             ctx.lineTo(p1.x, p1.y);
