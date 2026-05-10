@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "fishing_map (Chrome + dart_defines.json)",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "debug",
+      "program": "lib/main.dart",
+      "cwd": "${workspaceFolder}",
+      "deviceId": "chrome",
+      "toolArgs": [
+        "--dart-define-from-file=dart_defines.json"
+      ]
+    },
+    {
+      "name": "fishing_map (Chrome, 無 local 密鑰檔)",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "debug",
+      "program": "lib/main.dart",
+      "cwd": "${workspaceFolder}",
+      "deviceId": "chrome"
+    }
+  ]
+}

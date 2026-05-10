@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="釣魚地圖平台">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="釣魚地圖">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <title>釣魚地圖</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Preconnect for tiles -->
+  <link rel="preconnect" href="https://api.mapbox.com">
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.15.0/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.15.0/mapbox-gl.js"></script>
+  <!-- 版本參數避免瀏覽器快取舊版 bridge（參數變更時請遞增） -->
+  <script src="mapbox_gl_bridge.js?v=202602102"></script>
+
+  <!-- image_picker on web loads from canvas / file input; no extra script required -->
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "CWA_AUTHORIZATION": "CWA-在此貼上中央氣象署授權碼",
+  "MAPBOX_ACCESS_TOKEN": "pk.在此貼上_Mapbox_公開_token",
+  "OCEAN_VECTORS_JSON_URL": ""
+}

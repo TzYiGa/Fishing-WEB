@@ -1,0 +1,41 @@
+name: fishing_map
+description: 釣魚地圖平台 — Flutter Web、Mapbox、Firebase
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  firebase_core: ^3.8.1
+  firebase_auth: ^5.3.4
+  cloud_firestore: ^5.5.1
+  firebase_storage: ^12.4.1
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+  provider: ^6.1.2
+  image_picker: ^1.1.2
+  uuid: ^4.5.1
+  cached_network_image: ^3.4.1
+  shared_preferences: ^2.5.5
+  http: ^1.6.0
+  pointer_interceptor: ^0.10.1+2
+  flutter_svg: ^2.0.10+1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - StationID.json
+    - assets/data/copernicus_ocean_vectors.json
+    - assets/cwa/cwa_tide_marker.svg
+    - assets/cwa/cwa_buoy_marker.svg

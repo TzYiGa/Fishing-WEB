@@ -1,0 +1,60 @@
+# 定期從 Copernicus Marine OPeNDAP 匯出台灣海域 uo/vo 向量 JSON，並提交回倉庫。
+# 需在 Repository secrets 設定（若 THREDDS 需登入）：
+#   CMEMS_USER、CMEMS_PASSWORD — 會寫入 ~/.netrc 供 xarray/OPeNDAP 使用
+#
+# 排程：每日 18:00 UTC（可改 cron）。亦可於 Actions 分頁手動執行「Run workflow」。
+
+name: Update Copernicus ocean vectors
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: copernicus-ocean-vectors
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: pip install -r tool/requirements-copernicus.txt
+
+      - name: Configure CMEMS .netrc
+        env:
+          CMEMS_USER: ${{ secrets.CMEMS_USER }}
+          CMEMS_PASSWORD: ${{ secrets.CMEMS_PASSWORD }}
+        run: |
+          if [ -n "${CMEMS_USER:-}" ] && [ -n "${CMEMS_PASSWORD:-}" ]; then
+            echo "machine nrt.cmems-du.eu login ${CMEMS_USER} password ${CMEMS_PASSWORD}" >> "${HOME}/.netrc"
+            chmod 600 "${HOME}/.netrc"
+            echo "Configured .netrc for nrt.cmems-du.eu"
+          else
+            echo "No CMEMS_USER/CMEMS_PASSWORD — open OPeNDAP may still work for some datasets"
+          fi
+
+      - name: Export vectors JSON
+        run: python tool/export_copernicus_ocean_vectors.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/data/copernicus_ocean_vectors.json
+          if git diff --staged --quiet; then
+            echo "No changes to copernicus_ocean_vectors.json"
+          else
+            git commit -m "chore(data): refresh Copernicus Taiwan ocean vectors"
+            git push
+          fi
