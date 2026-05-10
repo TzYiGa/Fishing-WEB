@@ -13,8 +13,10 @@ import "package:fishing_map/services/spot_repository.dart";
 import "package:fishing_map/services/user_settings_repository.dart";
 import "package:fishing_map/widgets/add_spot_sheet.dart";
 import "package:fishing_map/widgets/fishing_map_view.dart";
+import "package:fishing_map/widgets/admin_web_action_debug_panel.dart";
 import "package:fishing_map/widgets/mapbox_interaction_overlay.dart";
 import "package:fishing_map/widgets/spot_category_filter_panel.dart";
+import "package:fishing_map/services/web_action_debug_log.dart";
 import "package:fishing_map/widgets/spot_detail_sheet.dart";
 import "package:firebase_auth/firebase_auth.dart";
 import "package:flutter/foundation.dart";
@@ -97,18 +99,31 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     try {
       final j = await _oceanVectors.buildFeatureCollectionJson();
       if (!mounted) return;
+      if (kIsWeb) {
+        WebActionDebugLog.instance.append(
+          "[ocean] prefetch done jsonLen=${j.length}",
+        );
+      }
       setState(() => _oceanFlowJsonT0 = j);
-    } catch (_) {}
+    } catch (e) {
+      if (!mounted || !kIsWeb) return;
+      WebActionDebugLog.instance.append("[ocean] prefetch error $e");
+    }
   }
 
   Future<void> _refreshOceanFlowField() async {
     if (!_showOceanCurrent || !kIsWeb) return;
+    WebActionDebugLog.instance.append("[ocean] refresh start");
     try {
       final j = await _oceanVectors.buildFeatureCollectionJson();
       if (!mounted) return;
+      WebActionDebugLog.instance.append(
+        "[ocean] refresh ok jsonLen=${j.length}",
+      );
       setState(() => _oceanFlowJsonT0 = j);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
+      WebActionDebugLog.instance.append("[ocean] refresh error $e");
       setState(
         () =>
             _oceanFlowJsonT0 = CopernicusOceanVectorService.emptyFeatureCollectionJson,
@@ -302,6 +317,11 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                       onShowCwaBuoyChanged: (v) => setState(() => _showCwaBuoy = v),
                       showOceanCurrent: _showOceanCurrent,
                       onShowOceanCurrentChanged: (v) {
+                        if (kIsWeb) {
+                          WebActionDebugLog.instance.append(
+                            "[ocean] toggle showOceanCurrent=$v",
+                          );
+                        }
                         setState(() => _showOceanCurrent = v);
                         if (v && kIsWeb) {
                           unawaited(_refreshOceanFlowField());
@@ -359,6 +379,11 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                   setState(() => _showCwaBuoy = v),
               showOceanCurrent: _showOceanCurrent,
               onShowOceanCurrentChanged: (v) {
+                if (kIsWeb) {
+                  WebActionDebugLog.instance.append(
+                    "[ocean] toggle showOceanCurrent=$v",
+                  );
+                }
                 setState(() => _showOceanCurrent = v);
                 if (v && kIsWeb) {
                   unawaited(_refreshOceanFlowField());
@@ -483,7 +508,20 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
           const SizedBox(width: 4),
         ],
       ),
-      body: kIsWeb ? _buildWebBody(context, safeLeft) : _buildNonWebBody(safeLeft),
+      body: kIsWeb
+          ? StreamBuilder<bool>(
+              stream: widget.auth.adminChanges,
+              builder: (context, adminSnap) {
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _buildWebBody(context, safeLeft),
+                    if (adminSnap.data == true) const AdminWebActionDebugPanel(),
+                  ],
+                );
+              },
+            )
+          : _buildNonWebBody(safeLeft),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => _togglePickMode(context),
         icon: Icon(_pickMode ? Icons.close_rounded : Icons.add_location_alt_outlined),

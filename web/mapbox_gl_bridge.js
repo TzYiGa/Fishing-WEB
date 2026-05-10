@@ -7,6 +7,17 @@
   /** 地圖建立前送達的海流場（T0/T1 GeoJSON、τ、開關）— WINDY SPEC v2 */
   const pendingFlowStore = {};
 
+  /** 管理員 DEBUG：`globalThis.fishingMapDartDebug(msg)` 由 Flutter 安裝（見 web_admin_debug_sink_web.dart）。 */
+  function fmpDbg(msg) {
+    try {
+      var fn =
+        typeof globalThis !== "undefined"
+          ? globalThis.fishingMapDartDebug
+          : null;
+      if (typeof fn === "function") fn(String(msg));
+    } catch (_) {}
+  }
+
   /**
    * Flutter Web 的 HtmlElementView 外包 flt-platform-view 且常設 aria-hidden，
    * Mapbox canvas 卻會承接焦點，觸發「對焦祖先被 aria-hidden 隱藏」警告。
@@ -1156,12 +1167,23 @@
 
   function wfEnsureWindyFlow(item, map) {
     if (!item.showFlowLayer || !map) {
+      fmpDbg(
+        "[wfEnsureWindyFlow] skip showFlowLayer=" +
+          String(item.showFlowLayer) +
+          " hasMap=" +
+          String(!!map)
+      );
       wfDestroyFlowRenderer(item);
       return;
     }
     const fc0 = wfParseFeatureCollectionJson(item.flowGeoJsonT0);
+    fmpDbg(
+      "[wfEnsureWindyFlow] fc0.features.length=" +
+        String(fc0.features ? fc0.features.length : 0)
+    );
     if (!fc0.features || fc0.features.length === 0) {
       wfDestroyFlowRenderer(item);
+      fmpDbg("[wfEnsureWindyFlow] destroy empty fc0");
       return;
     }
     const j1 = item.flowGeoJsonT1 && String(item.flowGeoJsonT1).trim() !== ""
@@ -1173,7 +1195,16 @@
     if (!wf || wf.gridSig !== sig) {
       wfDestroyFlowRenderer(item);
       const grid = wfBuildUvDoubleGridFromFc(fc0, fc1);
-      if (!grid || grid.vmax < 1e-5) return;
+      if (!grid || grid.vmax < 1e-5) {
+        fmpDbg(
+          "[wfEnsureWindyFlow] no grid or vmax tiny grid=" +
+            String(!!grid) +
+            " vmax=" +
+            String(grid ? grid.vmax : "n/a")
+        );
+        return;
+      }
+      fmpDbg("[wfEnsureWindyFlow] grid ok vmax=" + String(grid.vmax));
       const rng = wfMulberry32(wfHashStr(item.containerId) ^ wfHashStr(sig));
       wf = {
         grid,
@@ -1238,6 +1269,7 @@
       };
       map.on("movestart", wf.onMoveStart);
       map.on("resize", wf.onResize);
+      fmpDbg("[wfEnsureWindyFlow] flow canvas DOM attached");
     }
 
     if (wf.raf == null) {
@@ -1669,6 +1701,7 @@
     maps[containerId] = item;
 
     map.on("load", () => {
+      fmpDbg("[map load] id=" + String(containerId));
       applyLanguage(map, languageField);
       ensureCwaStationLayers(map, item);
       if (!map.getSource("spots")) {
@@ -1707,6 +1740,21 @@
     const showTide = parseShowCwaFlag(showCwaTideLayer);
     const showBuoy = parseShowCwaFlag(showCwaBuoyLayer);
     const showFlow = parseShowCwaFlag(showFlowLayer);
+    try {
+      var pj0 = JSON.parse(flowGeoJsonT0 || "{}");
+      fmpDbg(
+        "[fishingMapCreate] id=" +
+          String(containerId) +
+          " showFlow=" +
+          String(showFlow) +
+          " f0.features.len=" +
+          String(
+            pj0.features && pj0.features.length ? pj0.features.length : 0
+          )
+      );
+    } catch (_) {
+      fmpDbg("[fishingMapCreate] id=" + String(containerId) + " f0 parse fail");
+    }
     createWhenReady(
       containerId,
       accessToken,
@@ -1751,7 +1799,21 @@
     if (Number.isNaN(tauU)) tauU = 0;
 
     let item = maps[containerId];
+    let f0FeatN = 0;
+    try {
+      var _pj = JSON.parse(f0 || "{}");
+      f0FeatN =
+        _pj.features && _pj.features.length ? _pj.features.length : 0;
+    } catch (_) {}
     if (!item) {
+      fmpDbg(
+        "[fishingMapUpdate] PENDING no item id=" +
+          String(containerId) +
+          " showFlow=" +
+          String(showFlow) +
+          " f0.features.len=" +
+          String(f0FeatN)
+      );
       pendingSpotUpdates[containerId] = spots;
       pendingCwaStore[containerId] = {
         stations: cwaStations,
@@ -1769,6 +1831,16 @@
     const map = item.map;
     const nextStyle = getStyleUrl(styleId);
     const styleChanging = item.styleId !== styleId;
+    fmpDbg(
+      "[fishingMapUpdate] id=" +
+        String(containerId) +
+        " showFlow=" +
+        String(showFlow) +
+        " f0.features.len=" +
+        String(f0FeatN) +
+        " styleChanging=" +
+        String(styleChanging)
+    );
 
     item.spotData = spots;
     item.cwaData = cwaStations;
@@ -1809,6 +1881,7 @@
       }
       patchMapboxFlutterPlatformViewA11y(map);
       // 同風格 delta 也必須同步海流（否則僅 map load／換風格 idle 會跑，勾選開關永遠不會建 canvas／RAF）。
+      fmpDbg("[applySameStyleDelta] call wfEnsureWindyFlow");
       try {
         wfEnsureWindyFlow(item, map);
       } catch (_) {}
@@ -1850,6 +1923,7 @@
           ensureSpotClusterLayers(map);
           wireMapClickHandlers(item);
           patchMapboxFlutterPlatformViewA11y(map);
+          fmpDbg("[style idle] wfEnsureWindyFlow");
           try {
             wfEnsureWindyFlow(item, map);
           } catch (_) {}
@@ -1911,6 +1985,7 @@
   };
 
   window.fishingMapDispose = function (containerId) {
+    fmpDbg("[fishingMapDispose] id=" + String(containerId));
     const item = maps[containerId];
     if (!item) return;
     try {

@@ -4,6 +4,7 @@ import "dart:js_util" as js_util;
 import "dart:ui_web" as ui_web;
 
 import "package:fishing_map/models/cwa_station_point.dart";
+import "package:fishing_map/services/web_action_debug_log.dart";
 import "package:fishing_map/models/fishing_spot.dart";
 import "package:fishing_map/widgets/mapbox_interaction_overlay.dart";
 import "package:flutter/material.dart";
@@ -144,6 +145,9 @@ class _MapboxWebCanvasState extends State<MapboxWebCanvas> {
   @override
   void dispose() {
     if (_created) {
+      WebActionDebugLog.instance.append(
+        "[MapboxWebCanvas] dispose id=$_containerId",
+      );
       _fishingMapDispose(_containerId);
     }
     super.dispose();
@@ -159,6 +163,13 @@ class _MapboxWebCanvasState extends State<MapboxWebCanvas> {
       widget.onSpotTap(spotId);
     }).toJS;
 
+    WebActionDebugLog.instance.append(
+      "[MapboxWebCanvas] create id=$_containerId "
+      "flow=${widget.showFlowLayer ? 1 : 0} "
+      "tau=${widget.flowDataTau} "
+      "f0.len=${widget.flowGeoJsonT0.length} "
+      "spots=${widget.spots.length}",
+    );
     _fishingMapCreate(
       _containerId,
       widget.accessToken,
@@ -183,6 +194,10 @@ class _MapboxWebCanvasState extends State<MapboxWebCanvas> {
   }
 
   void _updateMap() {
+    WebActionDebugLog.instance.append(
+      "[MapboxWebCanvas] update id=$_containerId "
+      "flow=${widget.showFlowLayer ? 1 : 0} f0.len=${widget.flowGeoJsonT0.length}",
+    );
     _fishingMapUpdate(
       _containerId,
       widget.styleId,
