@@ -9,8 +9,10 @@ class MapboxWebCanvas extends StatelessWidget {
     this.cwaStations = const [],
     this.showCwaTide = true,
     this.showCwaBuoy = true,
-    this.showOceanCurrent = false,
-    this.oceanCurrentGeoJson = '{"type":"FeatureCollection","features":[]}',
+    this.showFlowLayer = false,
+    this.flowGeoJsonT0 = '{"type":"FeatureCollection","features":[]}',
+    this.flowGeoJsonT1 = "",
+    this.flowDataTau = 0,
     required this.pickMode,
     required this.styleId,
     required this.languageField,
@@ -23,8 +25,10 @@ class MapboxWebCanvas extends StatelessWidget {
   final List<CwaStationPoint> cwaStations;
   final bool showCwaTide;
   final bool showCwaBuoy;
-  final bool showOceanCurrent;
-  final String oceanCurrentGeoJson;
+  final bool showFlowLayer;
+  final String flowGeoJsonT0;
+  final String flowGeoJsonT1;
+  final double flowDataTau;
   final bool pickMode;
   final String styleId;
   final String languageField;

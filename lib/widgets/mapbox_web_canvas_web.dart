@@ -20,8 +20,10 @@ external void _fishingMapCreate(
   String cwaStationsJson,
   int showCwaTideLayer,
   int showCwaBuoyLayer,
-  int showOceanCurrentLayer,
-  String oceanCurrentGeoJson,
+  int showFlowLayer,
+  String flowGeoJsonT0,
+  String flowGeoJsonT1,
+  String flowDataTauStr,
   JSFunction onMapClick,
   JSFunction onSpotClick,
 );
@@ -35,8 +37,10 @@ external void _fishingMapUpdate(
   String cwaStationsJson,
   int showCwaTideLayer,
   int showCwaBuoyLayer,
-  int showOceanCurrentLayer,
-  String oceanCurrentGeoJson,
+  int showFlowLayer,
+  String flowGeoJsonT0,
+  String flowGeoJsonT1,
+  String flowDataTauStr,
 );
 
 @JS("fishingMapDispose")
@@ -49,8 +53,10 @@ class MapboxWebCanvas extends StatefulWidget {
     this.cwaStations = const [],
     this.showCwaTide = true,
     this.showCwaBuoy = true,
-    this.showOceanCurrent = false,
-    this.oceanCurrentGeoJson = '{"type":"FeatureCollection","features":[]}',
+    this.showFlowLayer = false,
+    this.flowGeoJsonT0 = '{"type":"FeatureCollection","features":[]}',
+    this.flowGeoJsonT1 = "",
+    this.flowDataTau = 0,
     required this.pickMode,
     required this.styleId,
     required this.languageField,
@@ -64,8 +70,12 @@ class MapboxWebCanvas extends StatefulWidget {
   final List<CwaStationPoint> cwaStations;
   final bool showCwaTide;
   final bool showCwaBuoy;
-  final bool showOceanCurrent;
-  final String oceanCurrentGeoJson;
+  /// WINDY SPEC v2：T_data 時間插值係數 τ∈[0,1]（與 JS 流場 lerp 同步）。
+  final bool showFlowLayer;
+  final String flowGeoJsonT0;
+  /// 空字串表示與 T0 相同（單時次場）。
+  final String flowGeoJsonT1;
+  final double flowDataTau;
   final bool pickMode;
   final String styleId;
   final String languageField;
@@ -117,14 +127,16 @@ class _MapboxWebCanvasState extends State<MapboxWebCanvas> {
         _cwaJson(oldWidget.cwaStations) != _cwaJson(widget.cwaStations) ||
             oldWidget.showCwaTide != widget.showCwaTide ||
             oldWidget.showCwaBuoy != widget.showCwaBuoy;
-    final oceanChanged =
-        oldWidget.showOceanCurrent != widget.showOceanCurrent ||
-        oldWidget.oceanCurrentGeoJson != widget.oceanCurrentGeoJson;
+    final flowChanged =
+        oldWidget.showFlowLayer != widget.showFlowLayer ||
+        oldWidget.flowGeoJsonT0 != widget.flowGeoJsonT0 ||
+        oldWidget.flowGeoJsonT1 != widget.flowGeoJsonT1 ||
+        oldWidget.flowDataTau != widget.flowDataTau;
     if (oldWidget.styleId != widget.styleId ||
         oldWidget.languageField != widget.languageField ||
         spotsChanged ||
         cwaChanged ||
-        oceanChanged) {
+        flowChanged) {
       _updateMap();
     }
   }
@@ -156,8 +168,10 @@ class _MapboxWebCanvasState extends State<MapboxWebCanvas> {
       _cwaJson(widget.cwaStations),
       widget.showCwaTide ? 1 : 0,
       widget.showCwaBuoy ? 1 : 0,
-      widget.showOceanCurrent ? 1 : 0,
-      widget.oceanCurrentGeoJson,
+      widget.showFlowLayer ? 1 : 0,
+      widget.flowGeoJsonT0,
+      widget.flowGeoJsonT1,
+      widget.flowDataTau.toString(),
       onMapClick,
       onSpotClick,
     );
@@ -175,8 +189,10 @@ class _MapboxWebCanvasState extends State<MapboxWebCanvas> {
       _cwaJson(widget.cwaStations),
       widget.showCwaTide ? 1 : 0,
       widget.showCwaBuoy ? 1 : 0,
-      widget.showOceanCurrent ? 1 : 0,
-      widget.oceanCurrentGeoJson,
+      widget.showFlowLayer ? 1 : 0,
+      widget.flowGeoJsonT0,
+      widget.flowGeoJsonT1,
+      widget.flowDataTau.toString(),
     );
   }
 

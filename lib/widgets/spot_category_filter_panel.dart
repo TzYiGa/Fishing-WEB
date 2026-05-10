@@ -8,6 +8,8 @@ import "package:flutter_svg/flutter_svg.dart";
 class SpotCategoryFilterPanel extends StatelessWidget {
   const SpotCategoryFilterPanel({
     super.key,
+    this.expansionController,
+    this.onExpansionChanged,
     required this.visibleIds,
     required this.onVisibleIdsChanged,
     required this.showCwaTide,
@@ -18,6 +20,9 @@ class SpotCategoryFilterPanel extends StatelessWidget {
     required this.onShowOceanCurrentChanged,
   });
 
+  /// 非 Web 疊在全螢幕地圖上時可選，用來收合並同步 Js 阻隔；Web 若浮層疊在地圖上請外層加 PointerInterceptor。
+  final ExpansibleController? expansionController;
+  final ValueChanged<bool>? onExpansionChanged;
   final Set<String> visibleIds;
   final ValueChanged<Set<String>> onVisibleIdsChanged;
   final bool showCwaTide;
@@ -74,6 +79,8 @@ class SpotCategoryFilterPanel extends StatelessWidget {
             ),
           ),
           child: ExpansionTile(
+            controller: expansionController,
+            onExpansionChanged: onExpansionChanged,
             initiallyExpanded: false,
             tilePadding: const EdgeInsets.fromLTRB(10, 4, 8, 4),
             childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),

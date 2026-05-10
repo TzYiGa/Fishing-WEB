@@ -4,7 +4,8 @@ import "dart:math" as math;
 import "package:flutter/services.dart";
 import "package:http/http.dart" as http;
 
-/// 由 Copernicus Marine（`uo`/`vo`）向量 JSON 產生 Mapbox／flutter_map 用之 GeoJSON `LineString`。
+/// 由 Copernicus Marine（`uo`/`vo`）向量 JSON 產生 GeoJSON `LineString`
+/// （Web Mapbox WINDY SPEC v2 粒子流場會讀取之速度／方位屬性）。
 ///
 /// JSON 格式：`[{ "lat", "lng", "u", "v" }, ...]`（`u`/`v` 為 m/s，東向／北向）。
 ///
@@ -20,7 +21,7 @@ class CopernicusOceanVectorService {
 
   static const String assetPath = "assets/data/copernicus_ocean_vectors.json";
 
-  /// 若設定，每次開啟海流時向此 URL 拉取 JSON（失敗則退回 bundle）。
+  /// 若設定，[buildFeatureCollectionJson] 會優先向此 URL `GET`（失敗則退回 bundle）。
   static const String vectorsJsonUrlFromEnvironment = String.fromEnvironment(
     "OCEAN_VECTORS_JSON_URL",
     defaultValue: "",

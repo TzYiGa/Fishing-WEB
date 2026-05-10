@@ -1,5 +1,4 @@
 import "dart:async";
-import "dart:convert";
 
 import "package:fishing_map/data/cwa_station_loader.dart";
 import "package:fishing_map/services/copernicus_ocean_vector_service.dart";
@@ -54,15 +53,21 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   List<CwaStationPoint> _cwaStations = const [];
   bool _showCwaTide = true;
   bool _showCwaBuoy = true;
+  /// Web Mapbox：WINDY SPEC v2 海流粒子層開關（資料見 [_oceanFlowJsonT0]／τ）。
   bool _showOceanCurrent = false;
-  String _oceanGeoJson = CopernicusOceanVectorService.emptyFeatureCollectionJson;
+  String _oceanFlowJsonT0 =
+      CopernicusOceanVectorService.emptyFeatureCollectionJson;
+  /// 空字串＝與 T0 相同（單時次）；雙時次時填入 T1 的 GeoJSON。
+  String _oceanFlowJsonT1 = "";
+  /// T_data 與仿真／繪製共用之 τ∈[0,1]（時間線性插值）。
+  double _oceanFlowTau = 0;
   final _oceanVectors = CopernicusOceanVectorService();
+  ExpansibleController? _filterExpansionController;
+  bool _filterPanelExpanded = false;
   /// 白名單：僅顯示勾選之類型對應的釣點。
   Set<String> _visibleCategoryIds = {for (final o in kSpotCategoryOptions) o.id};
   String? _activeUid;
   bool _applyingRemoteSettings = false;
-  /// 避免 [MouseRegion.onEnter] 重複觸發造成多餘 push、與 onExit 不對稱。
-  bool _filterPanelPointerInside = false;
 
   List<FishingSpot> get _visibleSpots =>
       _spots.where((s) => _visibleCategoryIds.contains(s.categoryId)).toList();
@@ -78,41 +83,35 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     _spotsSub = widget.repo.watchSpots().listen((list) {
       if (mounted) setState(() => _spots = list);
     });
+    if (!kIsWeb) {
+      _filterExpansionController = ExpansibleController();
+    }
     _loadCwaStations();
+    if (kIsWeb) {
+      unawaited(_prefetchOceanFlowJsonForWeb());
+    }
   }
 
-  Future<void> _refreshOceanCurrentField() async {
-    if (!_showOceanCurrent) return;
+  /// Web：預載 Copernicus 線段 GeoJSON → JS 側建欧拉格網／雙線性取樣。
+  Future<void> _prefetchOceanFlowJsonForWeb() async {
     try {
       final j = await _oceanVectors.buildFeatureCollectionJson();
       if (!mounted) return;
-      var featureCount = 0;
-      try {
-        final o = jsonDecode(j);
-        if (o is Map<String, dynamic>) {
-          final f = o["features"];
-          if (f is List) featureCount = f.length;
-        }
-      } catch (_) {}
-      setState(() => _oceanGeoJson = j);
+      setState(() => _oceanFlowJsonT0 = j);
+    } catch (_) {}
+  }
+
+  Future<void> _refreshOceanFlowField() async {
+    if (!_showOceanCurrent || !kIsWeb) return;
+    try {
+      final j = await _oceanVectors.buildFeatureCollectionJson();
       if (!mounted) return;
-      if (featureCount == 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              "尚無海流向量資料。請於本機執行：python tool/export_copernicus_ocean_vectors.py",
-            ),
-          ),
-        );
-      }
+      setState(() => _oceanFlowJsonT0 = j);
     } catch (_) {
       if (!mounted) return;
       setState(
-        () => _oceanGeoJson = CopernicusOceanVectorService.emptyFeatureCollectionJson,
-      );
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("讀取 Copernicus 海流 JSON 失敗")),
+        () =>
+            _oceanFlowJsonT0 = CopernicusOceanVectorService.emptyFeatureCollectionJson,
       );
     }
   }
@@ -195,10 +194,11 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
 
   @override
   void dispose() {
-    if (_filterPanelPointerInside) {
-      _filterPanelPointerInside = false;
+    if (_filterPanelExpanded) {
+      _filterPanelExpanded = false;
       popMapboxInteractionBlock();
     }
+    _filterExpansionController?.dispose();
     _authSub?.cancel();
     _spotsSub?.cancel();
     widget.settingsListenable.removeListener(_persistSettingsForUser);
@@ -250,6 +250,127 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     });
   }
 
+  Widget _fishingMapFill() {
+    return FishingMapView(
+      pickMode: _pickMode,
+      mapController: _mapCtrl,
+      spots: _visibleSpots,
+      cwaStations: _cwaStations,
+      showCwaTide: _showCwaTide,
+      showCwaBuoy: _showCwaBuoy,
+      showOceanFlow: _showOceanCurrent && kIsWeb,
+      oceanFlowGeoJsonT0: _oceanFlowJsonT0,
+      oceanFlowGeoJsonT1: _oceanFlowJsonT1,
+      oceanFlowDataTau: _oceanFlowTau,
+      settingsListenable: widget.settingsListenable,
+      onSpotTap: (s) =>
+          SpotDetailSheet.open(context, spot: s, repo: widget.repo, auth: widget.auth),
+      onTapAt: (lng) => _onMapPick(lng, context),
+    );
+  }
+
+  /// Web：全幅地圖 + 左上角浮層篩選（可捲動、限高）。
+  /// 若用 [Row] 左欄／右欄，左欄只佔篩選卡片寬度，其「下方」沒有 Flutter 子項，會整片露出 Scaffold 底色（看起來像地圖沒鋪滿）。
+  /// [PointerInterceptor] 讓篩選區能點，避免底層 Mapbox [HtmlElementView] 搶事件。
+  Widget _buildWebBody(BuildContext context, double safeLeft) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final sideMaxH = constraints.maxHeight > 120
+            ? (constraints.maxHeight - 16).clamp(120.0, double.infinity)
+            : 280.0;
+        return Stack(
+          fit: StackFit.expand,
+          clipBehavior: Clip.none,
+          children: [
+            _fishingMapFill(),
+            Positioned(
+              left: safeLeft + 8,
+              top: 8,
+              child: PointerInterceptor(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: 272, maxHeight: sideMaxH),
+                  child: SingleChildScrollView(
+                    primary: false,
+                    clipBehavior: Clip.hardEdge,
+                    child: SpotCategoryFilterPanel(
+                      visibleIds: _visibleCategoryIds,
+                      onVisibleIdsChanged: (next) =>
+                          setState(() => _visibleCategoryIds = next),
+                      showCwaTide: _showCwaTide,
+                      onShowCwaTideChanged: (v) => setState(() => _showCwaTide = v),
+                      showCwaBuoy: _showCwaBuoy,
+                      onShowCwaBuoyChanged: (v) => setState(() => _showCwaBuoy = v),
+                      showOceanCurrent: _showOceanCurrent,
+                      onShowOceanCurrentChanged: (v) {
+                        setState(() => _showOceanCurrent = v);
+                        if (v && kIsWeb) {
+                          unawaited(_refreshOceanFlowField());
+                        }
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// 手機／非 Web：`flutter_map` 可與 Stack 疊加，維持左上角浮層。
+  Widget _buildNonWebBody(double safeLeft) {
+    return Stack(
+      fit: StackFit.expand,
+      clipBehavior: Clip.none,
+      children: [
+        _fishingMapFill(),
+        if (_filterPanelExpanded)
+          Positioned.fill(
+            child: PointerInterceptor(
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _filterExpansionController?.collapse(),
+              ),
+            ),
+          ),
+        Positioned(
+          top: 8,
+          left: 8 + safeLeft,
+          child: PointerInterceptor(
+            child: SpotCategoryFilterPanel(
+              expansionController: _filterExpansionController!,
+              onExpansionChanged: (expanded) {
+                setState(() => _filterPanelExpanded = expanded);
+                if (expanded) {
+                  pushMapboxInteractionBlock();
+                } else {
+                  popMapboxInteractionBlock();
+                }
+              },
+              visibleIds: _visibleCategoryIds,
+              onVisibleIdsChanged: (next) =>
+                  setState(() => _visibleCategoryIds = next),
+              showCwaTide: _showCwaTide,
+              onShowCwaTideChanged: (v) =>
+                  setState(() => _showCwaTide = v),
+              showCwaBuoy: _showCwaBuoy,
+              onShowCwaBuoyChanged: (v) =>
+                  setState(() => _showCwaBuoy = v),
+              showOceanCurrent: _showOceanCurrent,
+              onShowOceanCurrentChanged: (v) {
+                setState(() => _showOceanCurrent = v);
+                if (v && kIsWeb) {
+                  unawaited(_refreshOceanFlowField());
+                }
+              },
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final safeLeft = MediaQuery.paddingOf(context).left;
@@ -291,8 +412,10 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
               PopupMenuItem<void>(
                 enabled: false,
                 padding: const EdgeInsets.all(0),
-                child: MapSettingsPanel(
-                  settingsListenable: widget.settingsListenable,
+                child: PointerInterceptor(
+                  child: MapSettingsPanel(
+                    settingsListenable: widget.settingsListenable,
+                  ),
                 ),
               ),
             ],
@@ -311,16 +434,18 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                   shape: const RoundedRectangleBorder(
                     borderRadius: BorderRadius.all(Radius.circular(16)),
                   ),
-                  itemBuilder: (context) => [
-                    PopupMenuItem<void>(
-                      enabled: false,
-                      padding: const EdgeInsets.all(0),
-                      child: AuthPopupPanel(auth: widget.auth),
-                    ),
-                  ],
-                );
-              }
-              return StreamBuilder<User?>(
+                    itemBuilder: (context) => [
+                      PopupMenuItem<void>(
+                        enabled: false,
+                        padding: const EdgeInsets.all(0),
+                        child: PointerInterceptor(
+                          child: AuthPopupPanel(auth: widget.auth),
+                        ),
+                      ),
+                    ],
+                  );
+                }
+                return StreamBuilder<User?>(
                 stream: widget.auth.authChanges,
                 builder: (context, snapshot) {
                   final isLoggedIn = snapshot.data != null;
@@ -345,7 +470,9 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                       PopupMenuItem<void>(
                         enabled: false,
                         padding: const EdgeInsets.all(0),
-                        child: AuthPopupPanel(auth: widget.auth),
+                        child: PointerInterceptor(
+                          child: AuthPopupPanel(auth: widget.auth),
+                        ),
                       ),
                     ],
                   );
@@ -356,62 +483,7 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
           const SizedBox(width: 4),
         ],
       ),
-      body: Stack(
-        fit: StackFit.expand,
-        clipBehavior: Clip.none,
-        children: [
-          FishingMapView(
-            pickMode: _pickMode,
-            mapController: _mapCtrl,
-            spots: _visibleSpots,
-            cwaStations: _cwaStations,
-            showCwaTide: _showCwaTide,
-            showCwaBuoy: _showCwaBuoy,
-            showOceanCurrent: _showOceanCurrent,
-            oceanCurrentGeoJson: _oceanGeoJson,
-            settingsListenable: widget.settingsListenable,
-            onSpotTap: (s) =>
-                SpotDetailSheet.open(context, spot: s, repo: widget.repo, auth: widget.auth),
-            onTapAt: (lng) => _onMapPick(lng, context),
-          ),
-          Positioned(
-            top: 8,
-            left: 8 + safeLeft,
-            child: PointerInterceptor(
-              child: MouseRegion(
-                onEnter: (_) {
-                  if (_filterPanelPointerInside) return;
-                  _filterPanelPointerInside = true;
-                  pushMapboxInteractionBlock();
-                },
-                onExit: (_) {
-                  if (!_filterPanelPointerInside) return;
-                  _filterPanelPointerInside = false;
-                  popMapboxInteractionBlock();
-                },
-                child: SpotCategoryFilterPanel(
-                  visibleIds: _visibleCategoryIds,
-                  onVisibleIdsChanged: (next) =>
-                      setState(() => _visibleCategoryIds = next),
-                  showCwaTide: _showCwaTide,
-                  onShowCwaTideChanged: (v) =>
-                      setState(() => _showCwaTide = v),
-                  showCwaBuoy: _showCwaBuoy,
-                  onShowCwaBuoyChanged: (v) =>
-                      setState(() => _showCwaBuoy = v),
-                  showOceanCurrent: _showOceanCurrent,
-                  onShowOceanCurrentChanged: (v) {
-                    setState(() => _showOceanCurrent = v);
-                    if (v) {
-                      unawaited(_refreshOceanCurrentField());
-                    }
-                  },
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
+      body: kIsWeb ? _buildWebBody(context, safeLeft) : _buildNonWebBody(safeLeft),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => _togglePickMode(context),
         icon: Icon(_pickMode ? Icons.close_rounded : Icons.add_location_alt_outlined),

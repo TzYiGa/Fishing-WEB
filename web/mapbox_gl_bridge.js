@@ -4,61 +4,98 @@
   const pendingSpotUpdates = {};
   /** 與 pendingSpotUpdates 並行：地圖建立前就送達的測站圖層設定 */
   const pendingCwaStore = {};
-  /** 地圖建立前送達的海流 GeoJSON／開關 */
-  const pendingOceanStore = {};
+  /** 地圖建立前送達的海流場（T0/T1 GeoJSON、τ、開關）— WINDY SPEC v2 */
+  const pendingFlowStore = {};
 
   /**
-   * 海流「沿向量流動」動畫：底層 ocean-current-lines 為依流速著色實線（資料驅動），
-   * 上層 ocean-current-flow 為純色虛線，只動 line-dashoffset，避免 dash 與 step 顏色同層不相容。
+   * Flutter Web 的 HtmlElementView 外包 flt-platform-view 且常設 aria-hidden，
+   * Mapbox canvas 卻會承接焦點，觸發「對焦祖先被 aria-hidden 隱藏」警告。
+   * 於地圖載入後移除該 aria-hidden，並讓 canvas／容器以 tabindex=-1 離開 tab 鏈。
    */
-  var oceanFlowAnimRaf = null;
-  var oceanFlowPhase = 0;
-
-  function scheduleOceanFlowAnimation() {
-    if (oceanFlowAnimRaf != null) return;
-    oceanFlowAnimRaf = requestAnimationFrame(tickOceanFlowAnim);
-  }
-
-  function tickOceanFlowAnim() {
-    oceanFlowAnimRaf = null;
-    var needNext = false;
-    oceanFlowPhase += 1.35;
-    var off = -(oceanFlowPhase % 36);
-    var pulse = 0.58 + 0.36 * Math.sin(oceanFlowPhase * 0.14);
-    for (const cid of Object.keys(maps)) {
-      const it = maps[cid];
-      if (!it || !it.showOceanCurrent) continue;
-      const m = it.map;
-      if (!m || typeof m.getLayer !== "function") continue;
-      if (m.getLayer("ocean-current-flow")) {
-        try {
-          m.setPaintProperty("ocean-current-flow", "line-dashoffset", off);
-          needNext = true;
-        } catch (_) {}
+  function patchMapboxFlutterPlatformViewA11y(map) {
+    if (!map || typeof map.getContainer !== "function") return;
+    try {
+      if (typeof map.loaded === "function" && !map.loaded()) return;
+    } catch (_) {
+      return;
+    }
+    const root = map.getContainer();
+    if (!root) return;
+    try {
+      let el = root.parentElement ? root.parentElement : null;
+      while (el) {
+        var tag = el.tagName && String(el.tagName).toUpperCase();
+        if (tag === "FLT-PLATFORM-VIEW") {
+          el.removeAttribute("aria-hidden");
+          break;
+        }
+        el = el.parentElement;
       }
-      if (m.getLayer("ocean-current-arrows")) {
-        try {
-          m.setPaintProperty("ocean-current-arrows", "icon-opacity", pulse);
-          needNext = true;
-        } catch (_) {}
+    } catch (_) {}
+    try {
+      if (typeof map.getCanvasContainer === "function") {
+        const wrap = map.getCanvasContainer();
+        if (wrap) {
+          wrap.setAttribute("tabindex", "-1");
+        }
       }
-    }
-    if (needNext) {
-      oceanFlowAnimRaf = requestAnimationFrame(tickOceanFlowAnim);
-    }
-  }
-
-  function stopOceanFlowAnimation() {
-    if (oceanFlowAnimRaf != null) {
-      cancelAnimationFrame(oceanFlowAnimRaf);
-      oceanFlowAnimRaf = null;
-    }
+    } catch (_) {}
+    try {
+      var cv = typeof map.getCanvas === "function" ? map.getCanvas() : null;
+      if (cv) {
+        cv.setAttribute("tabindex", "-1");
+      }
+    } catch (_) {}
   }
 
   function getStyleUrl(styleId) {
     if (!styleId) return "mapbox://styles/mapbox/outdoors-v12";
     if (styleId.startsWith("mapbox://")) return styleId;
     return `mapbox://styles/${styleId}`;
+  }
+
+  /**
+   * style 尚未 ready 時呼叫 getStyle/getLayer/getSource 會拋 "Style is not done loading"，
+   * 錯誤傳回 Flutter Scheduler 易造成整頁白屏。
+   */
+  function runAfterMapStyleReady(map, fn) {
+    if (!map || typeof fn !== "function") return;
+
+    function attempt(isRetryIdle) {
+      try {
+        fn();
+      } catch (e) {
+        const msg = e && e.message ? String(e.message) : String(e || "");
+        if (
+          !isRetryIdle &&
+          msg.indexOf("Style is not done loading") !== -1 &&
+          typeof map.once === "function"
+        ) {
+          map.once("idle", function () {
+            attempt(true);
+          });
+        }
+      }
+    }
+
+    try {
+      if (!map.loaded || typeof map.loaded !== "function" || !map.loaded()) {
+        if (typeof map.once === "function") {
+          map.once("load", function () {
+            attempt(false);
+          });
+        }
+        return;
+      }
+    } catch (_) {
+      if (typeof map.once === "function") {
+        map.once("load", function () {
+          attempt(false);
+        });
+      }
+      return;
+    }
+    attempt(false);
   }
 
   /** 與 Flutter `assets/cwa/cwa_tide_marker.svg` 內容一致；fetch 失敗時內嵌使用。 */
@@ -121,6 +158,11 @@
   }
 
   function applyLanguage(map, languageField) {
+    try {
+      if (!map.loaded || typeof map.loaded !== "function" || !map.loaded()) return;
+    } catch (_) {
+      return;
+    }
     const style = map.getStyle();
     if (!style || !style.layers) return;
     for (const layer of style.layers) {
@@ -138,7 +180,6 @@
       )
         continue;
       if (layer.id === "cwa-stations-label") continue;
-      if (layer.id === "ocean-current-arrows") continue;
       if (isRoadShieldLayer(layer.id)) continue;
       try {
         const textField = map.getLayoutProperty(layer.id, "text-field");
@@ -545,241 +586,785 @@
     return true;
   }
 
-  function parseOceanFeatureCollectionJson(s) {
+  // ---------------------------------------------------------------------------
+  // WINDY-STYLE FLOW RENDERER — PRODUCTION SPEC v2 (P1–P5, 3-clock, SoA, RK2)
+  // ---------------------------------------------------------------------------
+  const WF_GRID_N = 96;
+  /** T_sim：固定物理步長（秒），以 CFL 子步滿足 |u|·dt / Δcell < 1 */
+  const WF_DT_SIM = 1.72;
+  const WF_PARTICLE_N = 840;
+  const WF_REF_ZOOM = 7.5;
+  const WF_FADE_ALPHA = 0.94;
+  const WF_LINE_WIDTH = 1.05;
+  const WF_SPEED_EPS = 0.025;
+  const WF_MAX_AGE_BASE = 380;
+  const WF_AGE_SPAN = 520;
+  const WF_DBG_ARROWS = 1;
+  const WF_DBG_TRACER = 2;
+  const WF_DBG_GRID = 4;
+  const WF_DBG_NO_FADE = 8;
+  const WF_DBG_NEAREST = 16;
+
+  function wfHashStr(s) {
+    let h = 2166136261 >>> 0;
+    const t = String(s || "");
+    for (let i = 0; i < t.length; i++) {
+      h ^= t.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h >>> 0;
+  }
+
+  function wfMulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      let t = (a += 0x6d2b79f5);
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function wfMetersPerDeg(latDeg) {
+    const rad = (latDeg * Math.PI) / 180;
+    const c = Math.cos(rad);
+    return { mLat: 111320, mLng: 111320 * Math.max(1e-6, Math.abs(c)) };
+  }
+
+  function wfWrapLongitude(lng) {
+    let x = lng;
+    while (x > 180) x -= 360;
+    while (x < -180) x += 360;
+    return x;
+  }
+
+  function wfParseFeatureCollectionJson(txt) {
     try {
-      if (s != null && typeof s === "object") {
-        if (s.type === "FeatureCollection" && Array.isArray(s.features)) return s;
-      }
-      const txt = typeof s === "string" ? s : JSON.stringify(s ?? {});
-      const o = JSON.parse(txt || "{}");
+      const o = typeof txt === "string" ? JSON.parse(txt || "{}") : txt;
       if (o && o.type === "FeatureCollection" && Array.isArray(o.features)) return o;
     } catch (_) {}
     return { type: "FeatureCollection", features: [] };
   }
 
-  /** 與 `lib/utils/ocean_current_polylines.dart` 分級一致（流速為 km/h，來自 u/v 換算）。 */
-  function oceanCurrentLineColorStep() {
-    return [
-      "step",
-      ["coalesce", ["to-number", ["get", "speed"]], 0],
-      "#E0F2FE",
-      0.5,
-      "#7DD3FC",
-      2,
-      "#0284C7",
-      4,
-      "#F59E0B",
-      8,
-      "#B91C1C",
-    ];
+  function wfBearingUvFromProps(props) {
+    const speedKmh = props.speed != null ? Number(props.speed) : NaN;
+    const br = props.bearing != null ? Number(props.bearing) : NaN;
+    if (Number.isNaN(speedKmh) || Number.isNaN(br)) return { u: NaN, v: NaN };
+    const speedMs = speedKmh / 3.6;
+    const brad = (br * Math.PI) / 180;
+    return { u: speedMs * Math.sin(brad), v: speedMs * Math.cos(brad) };
   }
 
-  /** 由線段終點＋ bearing 產生箭頭用 Point 圖層（與線向量同向）。 */
-  function buildOceanArrowPointFc(fc) {
-    const feats = [];
-    const list = (fc && fc.features) || [];
-    for (var i = 0; i < list.length; i++) {
-      const f = list[i];
+  function wfBuildUvDoubleGridFromFc(fc0, fc1) {
+    const feats0 = fc0 && fc0.features ? fc0.features : [];
+    let minLng = 180;
+    let maxLng = -180;
+    let minLat = 90;
+    let maxLat = -90;
+    for (let i = 0; i < feats0.length; i++) {
+      const f = feats0[i];
       if (!f || !f.geometry || f.geometry.type !== "LineString") continue;
-      const c = f.geometry.coordinates;
-      if (!c || c.length < 2) continue;
-      const end = c[c.length - 1];
-      const p = f.properties || {};
-      var br = p.bearing != null ? Number(p.bearing) : NaN;
-      if (Number.isNaN(br)) br = 0;
-      feats.push({
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [end[0], end[1]] },
-        properties: {
-          bearing: br,
-          speed: p.speed != null ? p.speed : 0,
-        },
-      });
+      const coords = f.geometry.coordinates;
+      if (!coords || coords.length < 2) continue;
+      for (const k of [0, coords.length - 1]) {
+        const c = coords[k];
+        const lg = Number(c[0]);
+        const lt = Number(c[1]);
+        if (Number.isNaN(lg) || Number.isNaN(lt)) continue;
+        if (lg < minLng) minLng = lg;
+        if (lg > maxLng) maxLng = lg;
+        if (lt < minLat) minLat = lt;
+        if (lt > maxLat) maxLat = lt;
+      }
     }
-    return { type: "FeatureCollection", features: feats };
-  }
+    if (!(maxLng > minLng && maxLat > minLat)) return null;
 
-  /** 箭頭圖示（尖端朝北），以 icon-rotate = bearing 對齊海流向量。 */
-  function ensureOceanArrowImageLoaded(map, onDone) {
-    if (map.hasImage("ocean-flow-arrow")) {
-      onDone();
-      return;
-    }
-    var canvas =
-      typeof document !== "undefined" && document.createElement
-        ? document.createElement("canvas")
-        : null;
-    if (!canvas) {
-      onDone();
-      return;
-    }
-    var w = 56;
-    var h = 56;
-    canvas.width = w;
-    canvas.height = h;
-    var ctx = canvas.getContext("2d");
-    if (!ctx) {
-      onDone();
-      return;
-    }
-    ctx.clearRect(0, 0, w, h);
-    ctx.translate(w / 2, h / 2);
-    ctx.fillStyle = "rgba(255,255,255,0.96)";
-    ctx.strokeStyle = "rgba(2,132,199,0.75)";
-    ctx.lineWidth = 1.8;
-    ctx.beginPath();
-    ctx.moveTo(0, -20);
-    ctx.lineTo(13, 16);
-    ctx.lineTo(-13, 16);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    var img = new Image();
-    img.onload = function () {
-      try {
-        if (!map.hasImage("ocean-flow-arrow")) {
-          map.addImage("ocean-flow-arrow", img, { pixelRatio: 2 });
+    const padLng = (maxLng - minLng) * 0.08 + 0.02;
+    const padLat = (maxLat - minLat) * 0.08 + 0.02;
+    minLng -= padLng;
+    maxLng += padLng;
+    minLat -= padLat;
+    maxLat += padLat;
+
+    const nx = WF_GRID_N;
+    const ny = WF_GRID_N;
+    const nCell = nx * ny;
+
+    function accumulate(fc, uSum, vSum, cnt) {
+      const feats = fc && fc.features ? fc.features : [];
+      for (let i = 0; i < feats.length; i++) {
+        const f = feats[i];
+        if (!f || !f.geometry || f.geometry.type !== "LineString") continue;
+        const coords = f.geometry.coordinates;
+        if (!coords || coords.length < 2) continue;
+        const p = f.properties || {};
+        const uv = wfBearingUvFromProps(p);
+        if (Number.isNaN(uv.u)) continue;
+        const a = coords[0];
+        const b = coords[coords.length - 1];
+        const lng0 = Number(a[0]);
+        const lat0 = Number(a[1]);
+        const lng1 = Number(b[0]);
+        const lat1 = Number(b[1]);
+        if ([lng0, lat0, lng1, lat1].some((x) => Number.isNaN(x))) continue;
+        const geoDist = Math.hypot(lng1 - lng0, lat1 - lat0);
+        const steps = Math.max(12, Math.min(100, Math.ceil(geoDist * 120)));
+        for (let s = 0; s <= steps; s++) {
+          const t = s / steps;
+          const lng = lng0 + t * (lng1 - lng0);
+          const lat = lat0 + t * (lat1 - lat0);
+          let ix = Math.floor(((lng - minLng) / (maxLng - minLng)) * (nx - 0.001));
+          let iy = Math.floor(((lat - minLat) / (maxLat - minLat)) * (ny - 0.001));
+          if (ix < 0) ix = 0;
+          if (iy < 0) iy = 0;
+          if (ix >= nx) ix = nx - 1;
+          if (iy >= ny) iy = ny - 1;
+          const idx = iy * nx + ix;
+          uSum[idx] += uv.u;
+          vSum[idx] += uv.v;
+          cnt[idx]++;
         }
-      } catch (_) {}
-      onDone();
-    };
-    img.onerror = function () {
-      onDone();
-    };
-    img.src = canvas.toDataURL("image/png");
-  }
-
-  /** 表層海流線＋流向箭頭＋虛線流動；箭頭在釣點圖層之下。 */
-  function ensureOceanCurrentLayers(map, item) {
-    const vis = item.showOceanCurrent ? "visible" : "none";
-    const fc = parseOceanFeatureCollectionJson(item.oceanCurrentGeoJson);
-    const arrowFc = buildOceanArrowPointFc(fc);
-
-    if (!map.getSource("ocean-current")) {
-      try {
-        map.addSource("ocean-current", { type: "geojson", data: fc });
-      } catch (_) {}
-    } else {
-      const st = map.getSource("ocean-current");
-      if (st && typeof st.setData === "function") {
-        try {
-          st.setData(fc);
-        } catch (_) {}
       }
     }
 
-    if (!map.getSource("ocean-current-arrows")) {
-      try {
-        map.addSource("ocean-current-arrows", { type: "geojson", data: arrowFc });
-      } catch (_) {}
-    } else {
-      const sa = map.getSource("ocean-current-arrows");
-      if (sa && typeof sa.setData === "function") {
-        try {
-          sa.setData(arrowFc);
-        } catch (_) {}
+    const u0 = new Float32Array(nCell);
+    const v0 = new Float32Array(nCell);
+    const u1 = new Float32Array(nCell);
+    const v1 = new Float32Array(nCell);
+    const c0 = new Int32Array(nCell);
+    const c1 = new Int32Array(nCell);
+    accumulate(fc0, u0, v0, c0);
+
+    const f1 = fc1 && fc1.features && fc1.features.length ? fc1 : null;
+    if (!f1) {
+      for (let i = 0; i < nCell; i++) {
+        u1[i] = u0[i];
+        v1[i] = v0[i];
+        c1[i] = c0[i];
       }
-    }
-
-    if (!map.getLayer("ocean-current-lines")) {
-      try {
-        map.addLayer({
-          id: "ocean-current-lines",
-          type: "line",
-          source: "ocean-current",
-          layout: { visibility: vis },
-          paint: {
-            "line-color": oceanCurrentLineColorStep(),
-            "line-width": 2.6,
-            "line-opacity": 0.94,
-            "line-cap": "round",
-            "line-join": "round",
-          },
-        });
-      } catch (_) {}
     } else {
-      try {
-        map.setLayoutProperty("ocean-current-lines", "visibility", vis);
-      } catch (_) {}
-    }
-    if (!map.getLayer("ocean-current-flow")) {
-      try {
-        map.addLayer({
-          id: "ocean-current-flow",
-          type: "line",
-          source: "ocean-current",
-          layout: { visibility: vis },
-          paint: {
-            "line-color": "rgba(255,255,255,0.72)",
-            "line-width": 2.2,
-            "line-opacity": 0.95,
-            "line-cap": "round",
-            "line-join": "round",
-            "line-dasharray": [1.2, 2.2],
-            "line-dashoffset": 0,
-          },
-        });
-      } catch (_) {}
-    } else {
-      try {
-        map.setLayoutProperty("ocean-current-flow", "visibility", vis);
-        map.setPaintProperty("ocean-current-flow", "line-dasharray", [1.2, 2.2]);
-      } catch (_) {}
+      accumulate(f1, u1, v1, c1);
     }
 
-    requestAnimationFrame(function () {
-      scheduleOceanFlowAnimation();
-    });
+    let vmax = 0;
+    const midLat = (minLat + maxLat) * 0.5;
+    const mp = wfMetersPerDeg(midLat);
+    const cellMLat = ((maxLat - minLat) / Math.max(1, ny - 1)) * mp.mLat;
+    const cellMLng = ((maxLng - minLng) / Math.max(1, nx - 1)) * mp.mLng;
+    const minCellMeters = Math.min(cellMLat, cellMLng);
 
-    ensureOceanArrowImageLoaded(map, function () {
-      if (!map.getLayer("ocean-current-arrows")) {
-        try {
-          map.addLayer({
-            id: "ocean-current-arrows",
-            type: "symbol",
-            source: "ocean-current-arrows",
-            layout: {
-              visibility: vis,
-              "icon-image": "ocean-flow-arrow",
-              "icon-rotate": ["get", "bearing"],
-              "icon-rotation-alignment": "map",
-              "icon-pitch-alignment": "map",
-              "icon-allow-overlap": true,
-              "icon-ignore-placement": true,
-              "icon-size": [
-                "interpolate",
-                ["linear"],
-                ["coalesce", ["to-number", ["get", "speed"]], 0],
-                0.08,
-                0.22,
-                0.6,
-                0.34,
-                2,
-                0.46,
-                6,
-                0.58,
-              ],
-            },
-            paint: {
-              "icon-opacity": 0.88,
-            },
-          });
-        } catch (_) {}
+    for (let i = 0; i < nCell; i++) {
+      if (c0[i] > 0) {
+        u0[i] /= c0[i];
+        v0[i] /= c0[i];
+        const sp = Math.hypot(u0[i], v0[i]);
+        if (sp > vmax) vmax = sp;
       } else {
-        try {
-          map.setLayoutProperty("ocean-current-arrows", "visibility", vis);
-        } catch (_) {}
+        u0[i] = NaN;
+        v0[i] = NaN;
       }
-      try {
-        if (map.getLayer("ocean-current-arrows") && map.getLayer("spots-clusters")) {
-          map.moveLayer("ocean-current-arrows", "spots-clusters");
-        }
-      } catch (_) {}
-      requestAnimationFrame(function () {
-        scheduleOceanFlowAnimation();
-      });
-    });
+      if (c1[i] > 0) {
+        u1[i] /= c1[i];
+        v1[i] /= c1[i];
+      } else {
+        u1[i] = u0[i];
+        v1[i] = v0[i];
+      }
+    }
+
+    return {
+      nx,
+      ny,
+      minLng,
+      maxLng,
+      minLat,
+      maxLat,
+      u0,
+      v0,
+      u1,
+      v1,
+      vmax,
+      minCellMeters,
+    };
   }
+
+  function wfSampleUV(grid, lng, lat, tau, debugNearest) {
+    if (
+      lng < grid.minLng ||
+      lng > grid.maxLng ||
+      lat < grid.minLat ||
+      lat > grid.maxLat
+    ) {
+      return { ok: false, u: 0, v: 0 };
+    }
+    const nx = grid.nx;
+    const ny = grid.ny;
+    const fx = ((lng - grid.minLng) / (grid.maxLng - grid.minLng)) * (nx - 1);
+    const fy = ((lat - grid.minLat) / (grid.maxLat - grid.minLat)) * (ny - 1);
+
+    function Uat(ix, iy) {
+      const idx = iy * nx + ix;
+      const a = grid.u0[idx];
+      const b = grid.u1[idx];
+      if (a !== a || b !== b) return NaN;
+      return a + (b - a) * tau;
+    }
+    function Vat(ix, iy) {
+      const idx = iy * nx + ix;
+      const a = grid.v0[idx];
+      const b = grid.v1[idx];
+      if (a !== a || b !== b) return NaN;
+      return a + (b - a) * tau;
+    }
+
+    if (debugNearest) {
+      let ix = Math.round(fx);
+      let iy = Math.round(fy);
+      if (ix < 0) ix = 0;
+      if (iy < 0) iy = 0;
+      if (ix >= nx) ix = nx - 1;
+      if (iy >= ny) iy = ny - 1;
+      const u = Uat(ix, iy);
+      const v = Vat(ix, iy);
+      if (Number.isNaN(u) || Number.isNaN(v)) return { ok: false, u: 0, v: 0 };
+      return { ok: true, u, v };
+    }
+
+    const ix0 = Math.floor(fx);
+    const iy0 = Math.floor(fy);
+    const ix1 = Math.min(nx - 1, ix0 + 1);
+    const iy1 = Math.min(ny - 1, iy0 + 1);
+    const tx = fx - ix0;
+    const ty = fy - iy0;
+    const w00 = (1 - tx) * (1 - ty);
+    const w10 = tx * (1 - ty);
+    const w01 = (1 - tx) * ty;
+    const w11 = tx * ty;
+    const u =
+      w00 * Uat(ix0, iy0) +
+      w10 * Uat(ix1, iy0) +
+      w01 * Uat(ix0, iy1) +
+      w11 * Uat(ix1, iy1);
+    const v =
+      w00 * Vat(ix0, iy0) +
+      w10 * Vat(ix1, iy0) +
+      w01 * Vat(ix0, iy1) +
+      w11 * Vat(ix1, iy1);
+    if (Number.isNaN(u) || Number.isNaN(v)) return { ok: false, u: 0, v: 0 };
+    return { ok: true, u, v };
+  }
+
+  function wfBuildLutRgba() {
+    const lut = new Uint8ClampedArray(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      const r = 8 + t * 220;
+      const g = 80 + t * 160;
+      const b = 160 - t * 120;
+      const r2 = Math.min(255, Math.max(0, r + t * 40));
+      const g2 = Math.min(255, Math.max(0, g + t * 80));
+      const b2 = Math.min(255, Math.max(0, b - t * 60));
+      const a = 175 + Math.floor(t * 70);
+      lut[i * 4] = r2 | 0;
+      lut[i * 4 + 1] = g2 | 0;
+      lut[i * 4 + 2] = b2 | 0;
+      lut[i * 4 + 3] = a;
+    }
+    return lut;
+  }
+
+  const WF_LUT_RGBA = wfBuildLutRgba();
+
+  function wfSpeedToLutIdx(speed) {
+    const le = Math.log(speed + WF_SPEED_EPS);
+    const lo = Math.log(WF_SPEED_EPS);
+    const hi = Math.log(2.4);
+    const t = (le - lo) / (hi - lo);
+    return Math.floor(Math.min(1, Math.max(0, t)) * 255);
+  }
+
+  function wfZoomCompensation(map) {
+    try {
+      const z = map.getZoom();
+      return Math.pow(2, WF_REF_ZOOM - z);
+    } catch (_) {
+      return 1;
+    }
+  }
+
+  function wfOccupancyBins(grid, nBinX, nBinY) {
+    return {
+      nx: nBinX,
+      ny: nBinY,
+      minLng: grid.minLng,
+      maxLng: grid.maxLng,
+      minLat: grid.minLat,
+      maxLat: grid.maxLat,
+      counts: new Int32Array(nBinX * nBinY),
+    };
+  }
+
+  function wfOccIndex(occ, lng, lat) {
+    const fx = (lng - occ.minLng) / (occ.maxLng - occ.minLng);
+    const fy = (lat - occ.minLat) / (occ.maxLat - occ.minLat);
+    let ix = Math.floor(fx * occ.nx);
+    let iy = Math.floor(fy * occ.ny);
+    if (ix < 0) ix = 0;
+    if (iy < 0) iy = 0;
+    if (ix >= occ.nx) ix = occ.nx - 1;
+    if (iy >= occ.ny) iy = occ.ny - 1;
+    return iy * occ.nx + ix;
+  }
+
+  function wfRecomputeOcc(w) {
+    const occ = w.occ;
+    occ.counts.fill(0);
+    const n = WF_PARTICLE_N;
+    for (let i = 0; i < n; i++) {
+      occ.counts[wfOccIndex(occ, w.lngs[i], w.lats[i])]++;
+    }
+  }
+
+  function wfRespawnParticle(w, item, i) {
+    const g = w.grid;
+    const rng = w.rng;
+    const tau = wfClampTau(item.flowDataTau);
+    const dbgN = (w.debugMask & WF_DBG_NEAREST) !== 0;
+    const occ = w.occ;
+    let bestIdx = -1;
+    let bestC = 1e9;
+    for (let b = 0; b < occ.counts.length; b++) {
+      if (occ.counts[b] < bestC) {
+        bestC = occ.counts[b];
+        bestIdx = b;
+      }
+    }
+    for (let attempt = 0; attempt < 72; attempt++) {
+      let lng;
+      let lat;
+      if (attempt < 36 && bestIdx >= 0) {
+        const iy = Math.floor(bestIdx / occ.nx);
+        const ix = bestIdx - iy * occ.nx;
+        const t0 = rng();
+        const t1 = rng();
+        lng = occ.minLng + ((ix + t0) / occ.nx) * (occ.maxLng - occ.minLng);
+        lat = occ.minLat + ((iy + t1) / occ.ny) * (occ.maxLat - occ.minLat);
+      } else {
+        lng = g.minLng + rng() * (g.maxLng - g.minLng);
+        lat = g.minLat + rng() * (g.maxLat - g.minLat);
+      }
+      const s = wfSampleUV(g, lng, lat, tau, dbgN);
+      if (s.ok) {
+        w.lngs[i] = lng;
+        w.lats[i] = lat;
+        w.prev_lngs[i] = lng;
+        w.prev_lats[i] = lat;
+        w.ages[i] = rng() * WF_AGE_SPAN;
+        w.max_ages[i] = WF_MAX_AGE_BASE + rng() * WF_AGE_SPAN;
+        return;
+      }
+    }
+  }
+
+  function wfClampTau(t) {
+    const x = Number(t);
+    if (Number.isNaN(x)) return 0;
+    if (x < 0) return 0;
+    if (x > 1) return 1;
+    return x;
+  }
+
+  function wfInitParticles(w, item) {
+    const tau = wfClampTau(item.flowDataTau);
+    const dbgN = (w.debugMask & WF_DBG_NEAREST) !== 0;
+    for (let i = 0; i < WF_PARTICLE_N; i++) {
+      wfRespawnParticle(w, item, i);
+    }
+    wfRecomputeOcc(w);
+  }
+
+  function wfStepParticle(w, item, i, dt, tau, zg, debugNearest) {
+    const g = w.grid;
+    const lngs = w.lngs;
+    const lats = w.lats;
+    const plng = w.prev_lngs;
+    const plat = w.prev_lats;
+
+    plng[i] = lngs[i];
+    plat[i] = lats[i];
+
+    const s0 = wfSampleUV(g, lngs[i], lats[i], tau, debugNearest);
+    if (!s0.ok) {
+      wfRespawnParticle(w, item, i);
+      return;
+    }
+
+    const mp0 = wfMetersPerDeg(lats[i]);
+    const u0s = s0.u * zg;
+    const v0s = s0.v * zg;
+    const k1_lng = (u0s / mp0.mLng) * dt;
+    const k1_lat = (v0s / mp0.mLat) * dt;
+
+    const mid_lng = lngs[i] + 0.5 * k1_lng;
+    const mid_lat = lats[i] + 0.5 * k1_lat;
+
+    const s1 = wfSampleUV(g, mid_lng, mid_lat, tau, debugNearest);
+    if (!s1.ok) {
+      lngs[i] = wfWrapLongitude(lngs[i] + k1_lng);
+      lats[i] += k1_lat;
+    } else {
+      const mp1 = wfMetersPerDeg(mid_lat);
+      const u1s = s1.u * zg;
+      const v1s = s1.v * zg;
+      lngs[i] = wfWrapLongitude(lngs[i] + (u1s / mp1.mLng) * dt);
+      lats[i] += (v1s / mp1.mLat) * dt;
+    }
+
+    w.ages[i] += 1;
+    if (w.ages[i] > w.max_ages[i]) {
+      wfRespawnParticle(w, item, i);
+    }
+  }
+
+  function wfAdvancePhysics(w, item, dtLogical, tau) {
+    const map = item.map;
+    const g = w.grid;
+    const zgPhy = wfZoomCompensation(map);
+    const vmax = g.vmax * zgPhy + WF_SPEED_EPS;
+    const minCell = Math.max(g.minCellMeters, 1e-5);
+    const dtSafe = (0.7 * minCell) / vmax;
+    let nSub = 1;
+    if (dtLogical > dtSafe && dtSafe > 1e-6) {
+      nSub = Math.ceil(dtLogical / dtSafe);
+      if (nSub > 64) nSub = 64;
+    }
+    const h = dtLogical / nSub;
+    const dbgN = (w.debugMask & WF_DBG_NEAREST) !== 0;
+    for (let s = 0; s < nSub; s++) {
+      const zg = wfZoomCompensation(map);
+      for (let i = 0; i < WF_PARTICLE_N; i++) {
+        wfStepParticle(w, item, i, h, tau, zg, dbgN);
+      }
+    }
+    if ((w.frameId & 7) === 0) wfRecomputeOcc(w);
+    w.frameId++;
+  }
+
+  function wfDestroyFlowRenderer(item) {
+    const wf = item._windyFlow;
+    if (!wf) return;
+    if (wf.raf != null) {
+      try {
+        cancelAnimationFrame(wf.raf);
+      } catch (_) {}
+      wf.raf = null;
+    }
+    const map = item.map;
+    if (map && wf.onMoveStart) {
+      try {
+        map.off("movestart", wf.onMoveStart);
+      } catch (_) {}
+    }
+    if (map && wf.onResize) {
+      try {
+        map.off("resize", wf.onResize);
+      } catch (_) {}
+    }
+    if (wf.canvas && wf.canvas.parentNode) {
+      try {
+        wf.canvas.parentNode.removeChild(wf.canvas);
+      } catch (_) {}
+    }
+    if (wf.dbgCanvas && wf.dbgCanvas.parentNode) {
+      try {
+        wf.dbgCanvas.parentNode.removeChild(wf.dbgCanvas);
+      } catch (_) {}
+    }
+    item._windyFlow = null;
+  }
+
+  function wfSyncFlowCanvasSize(map, canvas) {
+    const mc = map.getCanvas && map.getCanvas();
+    if (!mc || !canvas) return;
+    const w = Math.floor(mc.width);
+    const h = Math.floor(mc.height);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
+    canvas.style.width = (mc.clientWidth || w / dpr) + "px";
+    canvas.style.height = (mc.clientHeight || h / dpr) + "px";
+  }
+
+  function wfDrawDebugOverlays(w, item, map, ctxDbg) {
+    const g = w.grid;
+    const tau = wfClampTau(item.flowDataTau);
+    const dbgN = (w.debugMask & WF_DBG_NEAREST) !== 0;
+    if ((w.debugMask & WF_DBG_GRID) !== 0) {
+      ctxDbg.save();
+      ctxDbg.fillStyle = "rgba(250,204,21,0.35)";
+      const step = 5;
+      for (let iy = 0; iy < g.ny; iy += step) {
+        for (let ix = 0; ix < g.nx; ix += step) {
+          const fx = (ix / (g.nx - 1)) * (g.maxLng - g.minLng) + g.minLng;
+          const fy = (iy / (g.ny - 1)) * (g.maxLat - g.minLat) + g.minLat;
+          const s = wfSampleUV(g, fx, fy, tau, dbgN);
+          if (!s.ok) continue;
+          try {
+            const p = map.project([fx, fy]);
+            ctxDbg.beginPath();
+            ctxDbg.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+            ctxDbg.fill();
+          } catch (_) {}
+        }
+      }
+      ctxDbg.restore();
+    }
+    if ((w.debugMask & WF_DBG_ARROWS) !== 0) {
+      ctxDbg.save();
+      ctxDbg.strokeStyle = "rgba(251,191,36,0.85)";
+      ctxDbg.lineWidth = 1.25;
+      const stepA = 7;
+      const dtArrow = 420;
+      for (let iy = 0; iy < g.ny; iy += stepA) {
+        for (let ix = 0; ix < g.nx; ix += stepA) {
+          const lng = (ix / (g.nx - 1)) * (g.maxLng - g.minLng) + g.minLng;
+          const lat = (iy / (g.ny - 1)) * (g.maxLat - g.minLat) + g.minLat;
+          const s = wfSampleUV(g, lng, lat, tau, dbgN);
+          if (!s.ok) continue;
+          const mp = wfMetersPerDeg(lat);
+          const dLng = (s.u * dtArrow) / mp.mLng;
+          const dLat = (s.v * dtArrow) / mp.mLat;
+          try {
+            const p0 = map.project([lng, lat]);
+            const p1 = map.project([lng + dLng, lat + dLat]);
+            ctxDbg.beginPath();
+            ctxDbg.moveTo(p0.x, p0.y);
+            ctxDbg.lineTo(p1.x, p1.y);
+            ctxDbg.stroke();
+          } catch (_) {}
+        }
+      }
+      ctxDbg.restore();
+    }
+  }
+
+  function wfGridSignature(j0, j1) {
+    return String(j0 || "") + "\n---T1---\n" + String(j1 || "");
+  }
+
+  function wfEnsureWindyFlow(item, map) {
+    if (!item.showFlowLayer || !map) {
+      wfDestroyFlowRenderer(item);
+      return;
+    }
+    const fc0 = wfParseFeatureCollectionJson(item.flowGeoJsonT0);
+    if (!fc0.features || fc0.features.length === 0) {
+      wfDestroyFlowRenderer(item);
+      return;
+    }
+    const j1 = item.flowGeoJsonT1 && String(item.flowGeoJsonT1).trim() !== ""
+      ? item.flowGeoJsonT1
+      : item.flowGeoJsonT0;
+    const fc1 = wfParseFeatureCollectionJson(j1);
+    const sig = wfGridSignature(item.flowGeoJsonT0, j1);
+    let wf = item._windyFlow;
+    if (!wf || wf.gridSig !== sig) {
+      wfDestroyFlowRenderer(item);
+      const grid = wfBuildUvDoubleGridFromFc(fc0, fc1);
+      if (!grid || grid.vmax < 1e-5) return;
+      const rng = wfMulberry32(wfHashStr(item.containerId) ^ wfHashStr(sig));
+      wf = {
+        grid,
+        gridSig: sig,
+        lngs: new Float32Array(WF_PARTICLE_N),
+        lats: new Float32Array(WF_PARTICLE_N),
+        prev_lngs: new Float32Array(WF_PARTICLE_N),
+        prev_lats: new Float32Array(WF_PARTICLE_N),
+        ages: new Float32Array(WF_PARTICLE_N),
+        max_ages: new Float32Array(WF_PARTICLE_N),
+        rng,
+        occ: wfOccupancyBins(grid, 28, 22),
+        simAccum: 0,
+        lastTs: typeof performance !== "undefined" ? performance.now() : 0,
+        raf: null,
+        frameId: 0,
+        canvas: null,
+        dbgCanvas: null,
+        debugMask: 0,
+        onMoveStart: null,
+        onResize: null,
+      };
+      wfInitParticles(wf, item);
+      item._windyFlow = wf;
+    }
+
+    wf = item._windyFlow;
+    if (!wf.canvas) {
+      const c = document.createElement("canvas");
+      c.style.position = "absolute";
+      c.style.left = "0";
+      c.style.top = "0";
+      c.style.pointerEvents = "none";
+      c.style.zIndex = "45";
+      c.setAttribute("aria-hidden", "true");
+      const host = map.getCanvasContainer && map.getCanvasContainer();
+      if (host) host.appendChild(c);
+      else map.getContainer().appendChild(c);
+      wf.canvas = c;
+      const dc = document.createElement("canvas");
+      dc.style.position = "absolute";
+      dc.style.left = "0";
+      dc.style.top = "0";
+      dc.style.pointerEvents = "none";
+      dc.style.zIndex = "46";
+      dc.setAttribute("aria-hidden", "true");
+      if (host) host.appendChild(dc);
+      else map.getContainer().appendChild(dc);
+      wf.dbgCanvas = dc;
+
+      wf.onMoveStart = function () {
+        wfSyncFlowCanvasSize(map, wf.canvas);
+        wfSyncFlowCanvasSize(map, wf.dbgCanvas);
+        try {
+          const ctx = wf.canvas.getContext("2d");
+          if (ctx) ctx.clearRect(0, 0, wf.canvas.width, wf.canvas.height);
+        } catch (_) {}
+      };
+      wf.onResize = function () {
+        wfSyncFlowCanvasSize(map, wf.canvas);
+        wfSyncFlowCanvasSize(map, wf.dbgCanvas);
+      };
+      map.on("movestart", wf.onMoveStart);
+      map.on("resize", wf.onResize);
+    }
+
+    if (wf.raf == null) {
+      wf.lastTs = typeof performance !== "undefined" ? performance.now() : 0;
+      wf.simAccum = 0;
+      const tick = function (now) {
+        if (!maps[item.containerId] || maps[item.containerId] !== item) {
+          wfDestroyFlowRenderer(item);
+          return;
+        }
+        if (!item.showFlowLayer) {
+          wfDestroyFlowRenderer(item);
+          return;
+        }
+        const wf2 = item._windyFlow;
+        if (!wf2) return;
+
+        const ctx = wf2.canvas.getContext("2d", { alpha: true });
+        const ctxDbg = wf2.dbgCanvas.getContext("2d", { alpha: true });
+        wfSyncFlowCanvasSize(map, wf2.canvas);
+        wfSyncFlowCanvasSize(map, wf2.dbgCanvas);
+
+        const tau = wfClampTau(item.flowDataTau);
+        let dtWall = 0;
+        if (wf2.lastTs > 0) {
+          dtWall = Math.min(0.12, Math.max(0, (now - wf2.lastTs) / 1000));
+        }
+        wf2.lastTs = now;
+
+        // T_sim catch-up（與 RAF 解耦；render 只吃最新粒子狀態）
+        wf2.simAccum += dtWall;
+        const maxLag = WF_DT_SIM * 6;
+        if (wf2.simAccum > maxLag) wf2.simAccum = maxLag;
+        while (wf2.simAccum >= WF_DT_SIM) {
+          wf2.simAccum -= WF_DT_SIM;
+          wfAdvancePhysics(wf2, item, WF_DT_SIM, tau);
+        }
+
+        const noFade = (wf2.debugMask & WF_DBG_NO_FADE) !== 0;
+        if (!noFade) {
+          ctx.globalCompositeOperation = "destination-in";
+          ctx.fillStyle = "rgba(" + 0 + "," + 0 + "," + 0 + "," + WF_FADE_ALPHA + ")";
+          ctx.fillRect(0, 0, wf2.canvas.width, wf2.canvas.height);
+          ctx.globalCompositeOperation = "source-over";
+        } else {
+          ctx.clearRect(0, 0, wf2.canvas.width, wf2.canvas.height);
+        }
+
+        ctx.lineWidth = WF_LINE_WIDTH;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+
+        let b;
+        try {
+          b = map.getBounds();
+        } catch (_) {
+          b = null;
+        }
+        const pad = 0.18;
+        const west = b ? b.getWest() - pad : -180;
+        const east = b ? b.getEast() + pad : 180;
+        const south = b ? b.getSouth() - pad : -90;
+        const north = b ? b.getNorth() + pad : 90;
+
+        const tracerOnly = (wf2.debugMask & WF_DBG_TRACER) !== 0;
+        const dbgNearest = (wf2.debugMask & WF_DBG_NEAREST) !== 0;
+
+        for (let i = 0; i < WF_PARTICLE_N; i++) {
+          if (tracerOnly && i !== 0) continue;
+          const lng0 = wf2.prev_lngs[i];
+          const lat0 = wf2.prev_lats[i];
+          const lng1 = wf2.lngs[i];
+          const lat1 = wf2.lats[i];
+          if (lng1 < west || lng1 > east || lat1 < south || lat1 > north) continue;
+          if (Math.abs(lng1 - lng0) > 180) continue;
+
+          let sMid = wfSampleUV(
+            wf2.grid,
+            (lng0 + lng1) * 0.5,
+            (lat0 + lat1) * 0.5,
+            tau,
+            dbgNearest,
+          );
+          let spd = sMid.ok ? Math.hypot(sMid.u, sMid.v) : 0;
+          const li = wfSpeedToLutIdx(spd);
+          const o = li * 4;
+          ctx.strokeStyle =
+            "rgba(" +
+            WF_LUT_RGBA[o] +
+            "," +
+            WF_LUT_RGBA[o + 1] +
+            "," +
+            WF_LUT_RGBA[o + 2] +
+            "," +
+            (WF_LUT_RGBA[o + 3] / 255).toFixed(3) +
+            ")";
+
+          try {
+            const p0 = map.project([lng0, lat0]);
+            const p1 = map.project([lng1, lat1]);
+            const dx = p1.x - p0.x;
+            const dy = p1.y - p0.y;
+            if (dx * dx + dy * dy > 360000) continue;
+            ctx.beginPath();
+            ctx.moveTo(p0.x, p0.y);
+            ctx.lineTo(p1.x, p1.y);
+            ctx.stroke();
+          } catch (_) {}
+        }
+
+        ctxDbg.clearRect(0, 0, wf2.dbgCanvas.width, wf2.dbgCanvas.height);
+        if ((wf2.debugMask & (WF_DBG_ARROWS | WF_DBG_GRID)) !== 0) {
+          wfDrawDebugOverlays(wf2, item, map, ctxDbg);
+        }
+
+        wf2.raf = requestAnimationFrame(tick);
+      };
+      wf.raf = requestAnimationFrame(tick);
+    }
+  }
+
+  /** D1–D4 + nearest（僅 debug）： bitmask 見 WF_DBG_* */
+  window.flowRendererSetDebug = function (containerId, mask) {
+    const item = maps[containerId];
+    if (!item || !item._windyFlow) return;
+    item._windyFlow.debugMask = Number(mask) | 0;
+  };
 
   /** 與 Dart `categoryId`（1-1 … 2-3）對應的單點顏色；叢集仍用上方藍階。 */
   function unclusteredCircleColorMatch() {
@@ -981,8 +1566,10 @@
     cwaStations,
     showCwaTide,
     showCwaBuoy,
-    showOceanCurrent,
-    oceanCurrentGeoJson,
+    showFlowLayer,
+    flowGeoJsonT0,
+    flowGeoJsonT1,
+    flowDataTauStr,
     onMapClick,
     onSpotClick,
     attempts
@@ -1001,8 +1588,10 @@
             cwaStations,
             showCwaTide,
             showCwaBuoy,
-            showOceanCurrent,
-            oceanCurrentGeoJson,
+            showFlowLayer,
+            flowGeoJsonT0,
+            flowGeoJsonT1,
+            flowDataTauStr,
             onMapClick,
             onSpotClick,
             attempts - 1
@@ -1032,15 +1621,22 @@
       delete pendingCwaStore[containerId];
     }
 
-    let mergedOceanShow = parseShowCwaFlag(showOceanCurrent);
-    let mergedOceanJson =
-      oceanCurrentGeoJson ||
-      '{"type":"FeatureCollection","features":[]}';
-    if (pendingOceanStore[containerId]) {
-      mergedOceanShow = parseShowCwaFlag(pendingOceanStore[containerId].show);
-      mergedOceanJson =
-        pendingOceanStore[containerId].geoJson || mergedOceanJson;
-      delete pendingOceanStore[containerId];
+    let mergedShowFlow = parseShowCwaFlag(showFlowLayer);
+    let mergedFlow0 = flowGeoJsonT0 || '{"type":"FeatureCollection","features":[]}';
+    let mergedFlow1 =
+      flowGeoJsonT1 && String(flowGeoJsonT1).trim() !== ""
+        ? flowGeoJsonT1
+        : mergedFlow0;
+    let mergedTau = wfClampTau(parseFloat(String(flowDataTauStr || "0")));
+    if (Number.isNaN(mergedTau)) mergedTau = 0;
+    if (pendingFlowStore[containerId]) {
+      const pf = pendingFlowStore[containerId];
+      mergedShowFlow = parseShowCwaFlag(pf.show);
+      mergedFlow0 = pf.t0 || mergedFlow0;
+      mergedFlow1 = pf.t1 && String(pf.t1).trim() !== "" ? pf.t1 : mergedFlow0;
+      mergedTau = wfClampTau(parseFloat(String(pf.tau != null ? pf.tau : "0")));
+      if (Number.isNaN(mergedTau)) mergedTau = 0;
+      delete pendingFlowStore[containerId];
     }
 
     const map = new mapboxgl.Map({
@@ -1056,6 +1652,7 @@
     // 前寫入，否則 getSource('spots') 尚不存在會丟掉 setData（F5 後常只看到空標記）。
     const item = {
       map,
+      containerId,
       onMapClick,
       onSpotClick,
       styleId,
@@ -1063,14 +1660,11 @@
       cwaData: mergedCwa,
       showCwaTide: mergedShowTide,
       showCwaBuoy: mergedShowBuoy,
-      showOceanCurrent: mergedOceanShow,
-      oceanCurrentGeoJson: mergedOceanJson,
     };
     maps[containerId] = item;
 
     map.on("load", () => {
       applyLanguage(map, languageField);
-      ensureOceanCurrentLayers(map, item);
       ensureCwaStationLayers(map, item);
       if (!map.getSource("spots")) {
         map.addSource(
@@ -1080,6 +1674,10 @@
       }
       ensureSpotClusterLayers(map);
       wireMapClickHandlers(item);
+      patchMapboxFlutterPlatformViewA11y(map);
+      try {
+        wfEnsureWindyFlow(item, map);
+      } catch (_) {}
     });
   }
 
@@ -1092,8 +1690,10 @@
     cwaStationsJson,
     showCwaTideLayer,
     showCwaBuoyLayer,
-    showOceanCurrentLayer,
-    oceanCurrentGeoJson,
+    showFlowLayer,
+    flowGeoJsonT0,
+    flowGeoJsonT1,
+    flowDataTauStr,
     onMapClick,
     onSpotClick
   ) {
@@ -1101,10 +1701,7 @@
     const cwaStations = JSON.parse(cwaStationsJson || "[]");
     const showTide = parseShowCwaFlag(showCwaTideLayer);
     const showBuoy = parseShowCwaFlag(showCwaBuoyLayer);
-    const showOcean = parseShowCwaFlag(showOceanCurrentLayer);
-    const oceanJson =
-      oceanCurrentGeoJson ||
-      '{"type":"FeatureCollection","features":[]}';
+    const showFlow = parseShowCwaFlag(showFlowLayer);
     createWhenReady(
       containerId,
       accessToken,
@@ -1114,8 +1711,10 @@
       cwaStations,
       showTide,
       showBuoy,
-      showOcean,
-      oceanJson,
+      showFlow,
+      flowGeoJsonT0 || '{"type":"FeatureCollection","features":[]}',
+      flowGeoJsonT1 || "",
+      flowDataTauStr || "0",
       onMapClick,
       onSpotClick,
       30
@@ -1130,17 +1729,21 @@
     cwaStationsJson,
     showCwaTideLayer,
     showCwaBuoyLayer,
-    showOceanCurrentLayer,
-    oceanCurrentGeoJson
+    showFlowLayer,
+    flowGeoJsonT0,
+    flowGeoJsonT1,
+    flowDataTauStr
   ) {
     const spots = JSON.parse(spotsJson || "[]");
     const cwaStations = JSON.parse(cwaStationsJson || "[]");
     const showTide = parseShowCwaFlag(showCwaTideLayer);
     const showBuoy = parseShowCwaFlag(showCwaBuoyLayer);
-    const showOcean = parseShowCwaFlag(showOceanCurrentLayer);
-    const oceanJson =
-      oceanCurrentGeoJson ||
-      '{"type":"FeatureCollection","features":[]}';
+    const showFlow = parseShowCwaFlag(showFlowLayer);
+    const f0 = flowGeoJsonT0 || '{"type":"FeatureCollection","features":[]}';
+    const f1 =
+      flowGeoJsonT1 && String(flowGeoJsonT1).trim() !== "" ? flowGeoJsonT1 : f0;
+    let tauU = wfClampTau(parseFloat(String(flowDataTauStr || "0")));
+    if (Number.isNaN(tauU)) tauU = 0;
 
     let item = maps[containerId];
     if (!item) {
@@ -1150,71 +1753,103 @@
         showTide: showTide,
         showBuoy: showBuoy,
       };
-      pendingOceanStore[containerId] = {
-        show: showOcean,
-        geoJson: oceanJson,
+      pendingFlowStore[containerId] = {
+        show: showFlow,
+        t0: f0,
+        t1: f1,
+        tau: tauU,
       };
       return;
     }
     const map = item.map;
     const nextStyle = getStyleUrl(styleId);
+    const styleChanging = item.styleId !== styleId;
+
     item.spotData = spots;
     item.cwaData = cwaStations;
     item.showCwaTide = showTide;
     item.showCwaBuoy = showBuoy;
-    item.showOceanCurrent = showOcean;
-    item.oceanCurrentGeoJson = oceanJson;
+    item.showFlowLayer = showFlow;
+    item.flowGeoJsonT0 = f0;
+    item.flowGeoJsonT1 = f1;
+    item.flowDataTau = tauU;
 
-    applyLanguage(map, languageField);
+    function applySameStyleDelta() {
+      if (!maps[containerId] || maps[containerId] !== item) return;
 
-    const splitUp = toCwaSplitCollections(cwaStations);
-    const cwaTideSrc = map.getSource("cwa-tide-stations");
-    if (cwaTideSrc && typeof cwaTideSrc.setData === "function") {
-      cwaTideSrc.setData(splitUp.tide);
-    }
-    const cwaBuoySrc = map.getSource("cwa-buoy-stations");
-    if (cwaBuoySrc && typeof cwaBuoySrc.setData === "function") {
-      cwaBuoySrc.setData(splitUp.buoy);
-    }
-    const visTide = showTide ? "visible" : "none";
-    const visBuoy = showBuoy ? "visible" : "none";
-    setCwaClusterLayerVisibility(map, visTide, visBuoy);
-    // load 完成前就收到 update 時圖層可能尚未建立（或舊版平面／單 symbol 圖層）
-    if (!map.getLayer("cwa-tide-unclustered") || !map.getLayer("cwa-buoy-unclustered")) {
-      try {
-        ensureCwaStationLayers(map, item);
-      } catch (_) {}
+      applyLanguage(map, languageField);
+
+      const splitUp = toCwaSplitCollections(cwaStations);
+      const cwaTideSrc = map.getSource("cwa-tide-stations");
+      if (cwaTideSrc && typeof cwaTideSrc.setData === "function") {
+        cwaTideSrc.setData(splitUp.tide);
+      }
+      const cwaBuoySrc = map.getSource("cwa-buoy-stations");
+      if (cwaBuoySrc && typeof cwaBuoySrc.setData === "function") {
+        cwaBuoySrc.setData(splitUp.buoy);
+      }
+      const visTide = showTide ? "visible" : "none";
+      const visBuoy = showBuoy ? "visible" : "none";
+      setCwaClusterLayerVisibility(map, visTide, visBuoy);
+      // load 完成前就收到 update 時圖層可能尚未建立（或舊版平面／單 symbol 圖層）
+      if (!map.getLayer("cwa-tide-unclustered") || !map.getLayer("cwa-buoy-unclustered")) {
+        try {
+          ensureCwaStationLayers(map, item);
+        } catch (_) {}
+      }
+
+      const source = map.getSource("spots");
+      if (source) {
+        source.setData(toFeatureCollection(spots));
+      }
+      patchMapboxFlutterPlatformViewA11y(map);
     }
 
-    const source = map.getSource("spots");
-    if (source) {
-      source.setData(toFeatureCollection(spots));
-    }
-    try {
-      ensureOceanCurrentLayers(map, item);
-    } catch (_) {}
-    if (item.styleId !== styleId) {
+    if (styleChanging) {
       item.styleId = styleId;
-      map.setStyle(nextStyle);
-      // styledata 常過早；idle 確保可依賴 sources/layers API，並可重綁 click。
-      map.once("idle", () => {
+      runAfterMapStyleReady(map, function applyStyleSwap() {
         if (!maps[containerId] || maps[containerId] !== item) return;
-        applyLanguage(map, languageField);
-        ensureOceanCurrentLayers(map, item);
-        ensureCwaStationLayers(map, item);
-        const src = map.getSource("spots");
-        if (!src) {
-          map.addSource(
-            "spots",
-            spotsSourceSpec(toFeatureCollection(item.spotData))
+        map.setStyle(nextStyle);
+        // styledata 常過早；idle 確保可依賴 sources/layers API，並可重綁 click。
+        map.once("idle", () => {
+          if (!maps[containerId] || maps[containerId] !== item) return;
+          applyLanguage(map, languageField);
+          ensureCwaStationLayers(map, item);
+          const splitIdle = toCwaSplitCollections(item.cwaData);
+          const tideNow = map.getSource("cwa-tide-stations");
+          if (tideNow && typeof tideNow.setData === "function") {
+            tideNow.setData(splitIdle.tide);
+          }
+          const buoyNow = map.getSource("cwa-buoy-stations");
+          if (buoyNow && typeof buoyNow.setData === "function") {
+            buoyNow.setData(splitIdle.buoy);
+          }
+          setCwaClusterLayerVisibility(
+            map,
+            item.showCwaTide ? "visible" : "none",
+            item.showCwaBuoy ? "visible" : "none"
           );
-        } else if (typeof src.setData === "function") {
-          src.setData(toFeatureCollection(item.spotData));
-        }
-        ensureSpotClusterLayers(map);
-        wireMapClickHandlers(item);
+          const src = map.getSource("spots");
+          if (!src) {
+            map.addSource(
+              "spots",
+              spotsSourceSpec(toFeatureCollection(item.spotData))
+            );
+          } else if (typeof src.setData === "function") {
+            src.setData(toFeatureCollection(item.spotData));
+          }
+          ensureSpotClusterLayers(map);
+          wireMapClickHandlers(item);
+          patchMapboxFlutterPlatformViewA11y(map);
+          try {
+            wfEnsureWindyFlow(item, map);
+          } catch (_) {}
+        });
       });
+      return;
     }
+
+    runAfterMapStyleReady(map, applySameStyleDelta);
   };
 
   function setMapInteractions(map, enabled) {
@@ -1245,12 +1880,23 @@
    * 勿設 pointer-events:none——會讓標記點完全點不進去，且未關閉底表時易卡死。
    */
   window.fishingMapSetInteractionsEnabledAll = function (enabled) {
-    const on = !!enabled;
+    let on = false;
+    if (typeof enabled === "number") {
+      on = enabled !== 0;
+    } else if (typeof enabled === "boolean") {
+      on = enabled;
+    } else {
+      on = !!enabled;
+    }
     for (const id of Object.keys(maps)) {
       const m = maps[id] && maps[id].map;
       if (!m) continue;
       try {
         setMapInteractions(m, on);
+        const el = typeof m.getContainer === "function" ? m.getContainer() : null;
+        if (el && el.style) {
+          el.style.pointerEvents = on ? "" : "none";
+        }
       } catch (_) {}
     }
   };
@@ -1258,14 +1904,13 @@
   window.fishingMapDispose = function (containerId) {
     const item = maps[containerId];
     if (!item) return;
-    stopOceanFlowAnimation();
+    try {
+      wfDestroyFlowRenderer(item);
+    } catch (_) {}
     item.map.remove();
     delete maps[containerId];
     delete pendingSpotUpdates[containerId];
     delete pendingCwaStore[containerId];
-    delete pendingOceanStore[containerId];
-    requestAnimationFrame(function () {
-      scheduleOceanFlowAnimation();
-    });
+    delete pendingFlowStore[containerId];
   };
 })();

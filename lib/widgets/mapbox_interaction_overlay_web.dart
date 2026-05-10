@@ -1,9 +1,14 @@
 import "dart:js_interop";
 
 @JS("fishingMapSetInteractionsEnabledAll")
-external void _jsSetInteractions(JSBoolean enabled);
+external void _jsSetInteractions(JSNumber enabledFlag);
 
 int _mapInteractionBlockDepth = 0;
+
+void _syncMapInteractionsToJs() {
+  final allow = _mapInteractionBlockDepth <= 0;
+  _jsSetInteractions((allow ? 1 : 0).toJS);
+}
 
 /// 與 [popMapboxInteractionBlock] 成對使用：疊加多處需阻擋地圖的 UI（篩選浮層、底表同時存在等）。
 ///
@@ -11,13 +16,13 @@ int _mapInteractionBlockDepth = 0;
 /// 僅一次 onExit 無法還原，導致地圖手勢與 Flutter 預期不一致、勾選無反應。
 void pushMapboxInteractionBlock() {
   _mapInteractionBlockDepth++;
-  _jsSetInteractions((_mapInteractionBlockDepth <= 0).toJS);
+  _syncMapInteractionsToJs();
 }
 
 void popMapboxInteractionBlock() {
   if (_mapInteractionBlockDepth <= 0) return;
   _mapInteractionBlockDepth--;
-  _jsSetInteractions((_mapInteractionBlockDepth <= 0).toJS);
+  _syncMapInteractionsToJs();
 }
 
 /// 依目前 [pushMapboxInteractionBlock] 深度同步 JS 地圖手勢（例如地圖 Web 元件重建後）。
@@ -26,7 +31,7 @@ void popMapboxInteractionBlock() {
 /// 歸零會讓地圖重新搶走指標，導致勾選／展開失效。
 void setMapboxInteractionsEnabledGlobally(bool enabled) {
   if (enabled) {
-    _jsSetInteractions((_mapInteractionBlockDepth <= 0).toJS);
+    _syncMapInteractionsToJs();
   } else {
     pushMapboxInteractionBlock();
   }

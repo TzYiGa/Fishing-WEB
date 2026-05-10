@@ -5,7 +5,6 @@ import "package:fishing_map/models/fishing_spot.dart";
 import "package:fishing_map/models/spot_category.dart";
 import "package:fishing_map/models/map_view_settings.dart";
 import "package:fishing_map/widgets/cwa_map_marker_assets.dart";
-import "package:fishing_map/widgets/ocean_current_animated_polyline_layer.dart";
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:flutter_map/flutter_map.dart";
@@ -21,8 +20,10 @@ class FishingMapView extends StatelessWidget {
     this.cwaStations = const [],
     this.showCwaTide = true,
     this.showCwaBuoy = true,
-    this.showOceanCurrent = false,
-    this.oceanCurrentGeoJson = '{"type":"FeatureCollection","features":[]}',
+    this.showOceanFlow = false,
+    this.oceanFlowGeoJsonT0 = '{"type":"FeatureCollection","features":[]}',
+    this.oceanFlowGeoJsonT1 = "",
+    this.oceanFlowDataTau = 0,
     required this.pickMode,
     required this.mapController,
     required this.onTapAt,
@@ -37,8 +38,11 @@ class FishingMapView extends StatelessWidget {
   final List<CwaStationPoint> cwaStations;
   final bool showCwaTide;
   final bool showCwaBuoy;
-  final bool showOceanCurrent;
-  final String oceanCurrentGeoJson;
+  /// Web Mapbox：WINDY SPEC v2 拉格朗日粒子流（非 Web 忽略）。
+  final bool showOceanFlow;
+  final String oceanFlowGeoJsonT0;
+  final String oceanFlowGeoJsonT1;
+  final double oceanFlowDataTau;
   final MapController mapController;
   final void Function(LatLng latLng) onTapAt;
   final void Function(FishingSpot spot) onSpotTap;
@@ -66,8 +70,10 @@ class FishingMapView extends StatelessWidget {
             cwaStations: cwaStations,
             showCwaTide: showCwaTide,
             showCwaBuoy: showCwaBuoy,
-            showOceanCurrent: showOceanCurrent,
-            oceanCurrentGeoJson: oceanCurrentGeoJson,
+            showFlowLayer: showOceanFlow,
+            flowGeoJsonT0: oceanFlowGeoJsonT0,
+            flowGeoJsonT1: oceanFlowGeoJsonT1,
+            flowDataTau: oceanFlowDataTau,
             pickMode: pickMode,
             styleId: styleId,
             languageField: settings.language.mapboxNameField,
@@ -104,10 +110,6 @@ class FishingMapView extends StatelessWidget {
               urlTemplate: urlTemplate,
               userAgentPackageName: "com.fishingmap.app",
             ),
-            if (showOceanCurrent)
-              OceanCurrentAnimatedPolylineLayer(
-                geoJson: oceanCurrentGeoJson,
-              ),
             if (showCwaTide)
               MarkerLayer(
                 markers: [
