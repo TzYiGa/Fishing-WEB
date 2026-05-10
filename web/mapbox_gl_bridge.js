@@ -607,7 +607,11 @@
   const WF_ANIM_FACTOR_DEFAULT = 96;
   /** true 時每一 slice 印 [wf.advance]（量大）；通常只開 [wf.tick] */
   const WF_ADV_VERBOSE_FLAG = "FISHING_FLOW_VERBOSE_DEBUG";
-  const WF_PARTICLE_N = 840;
+  /** 視覺密度（非線寬）；勿設過大以免低階裝置掉幀 */
+  const WF_PARTICLE_N = 2800;
+  /** 拖尾在「螢幕/CSS 像素」上至少此長度，換算到 canvas buffer 繪製（避免運動小於 1px 看不見） */
+  const WF_MIN_STROKE_CSS_PX = 2.5;
+  /** 可選：globalThis.FISHING_FLOW_MIN_STROKE_CSS_PX */
   const WF_REF_ZOOM = 7.5;
   const WF_FADE_ALPHA = 0.94;
   const WF_LINE_WIDTH = 1.05;
@@ -634,6 +638,34 @@
       typeof globalThis !== "undefined" &&
       globalThis[WF_ADV_VERBOSE_FLAG] === true
     );
+  }
+
+  /** 每段 stroke 在 backing buffer 上至少此長度 ≈ WF_MIN_STROKE_CSS_PX 個 CSS px */
+  function wfMinStrokeBufPxFor(map) {
+    let css = WF_MIN_STROKE_CSS_PX;
+    if (typeof globalThis !== "undefined") {
+      const ov = globalThis.FISHING_FLOW_MIN_STROKE_CSS_PX;
+      if (ov != null && !Number.isNaN(Number(ov))) {
+        css = Math.max(1, Math.min(12, Number(ov)));
+      }
+    }
+    try {
+      const mc = map && map.getCanvas && map.getCanvas();
+      if (
+        mc &&
+        mc.clientWidth &&
+        mc.clientWidth > 0 &&
+        mc.width &&
+        mc.width > 0
+      ) {
+        return css * (mc.width / mc.clientWidth);
+      }
+    } catch (_) {}
+    const dpr =
+      typeof window !== "undefined" && window.devicePixelRatio
+        ? window.devicePixelRatio
+        : 1;
+    return css * Math.max(1, dpr);
   }
 
   function wfHashStr(s) {
@@ -1285,7 +1317,7 @@
         ages: new Float32Array(WF_PARTICLE_N),
         max_ages: new Float32Array(WF_PARTICLE_N),
         rng,
-        occ: wfOccupancyBins(grid, 28, 22),
+        occ: wfOccupancyBins(grid, 32, 26),
         lastTs: typeof performance !== "undefined" ? performance.now() : 0,
         raf: null,
         frameId: 0,
@@ -1463,6 +1495,7 @@
           mcDraw && mcDraw.clientWidth ? mcDraw.clientWidth : wf2.canvas.width;
         const maxJumpBuf =
           Math.max(wf2.canvas.width / Math.max(1, cwDraw), 1) * 600;
+        const minLenBuf = wfMinStrokeBufPxFor(map);
 
         for (let i = 0; i < WF_PARTICLE_N; i++) {
           if (tracerOnly && i !== 0) continue;
@@ -1497,12 +1530,20 @@
           try {
             const p0 = wfMapProjectToCanvasBuffer(map, lng0, lat0);
             const p1 = wfMapProjectToCanvasBuffer(map, lng1, lat1);
-            const dx = p1.x - p0.x;
-            const dy = p1.y - p0.y;
-            if (dx * dx + dy * dy > maxJumpBuf * maxJumpBuf) continue;
+            let dx = p1.x - p0.x;
+            let dy = p1.y - p0.y;
+            const len2 = dx * dx + dy * dy;
+            if (len2 > maxJumpBuf * maxJumpBuf) continue;
+            const len = Math.sqrt(len2);
+            if (len < 1e-6) continue;
+            if (len < minLenBuf) {
+              const s = minLenBuf / len;
+              dx *= s;
+              dy *= s;
+            }
             ctx.beginPath();
             ctx.moveTo(p0.x, p0.y);
-            ctx.lineTo(p1.x, p1.y);
+            ctx.lineTo(p0.x + dx, p0.y + dy);
             ctx.stroke();
           } catch (_) {}
         }
