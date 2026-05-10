@@ -1,5 +1,4 @@
 import "package:fishing_map/services/web_action_debug_log.dart";
-import "package:fishing_map/widgets/web_admin_debug_sink.dart";
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:pointer_interceptor/pointer_interceptor.dart";
@@ -22,7 +21,7 @@ class _AdminWebActionDebugPanelState extends State<AdminWebActionDebugPanel> {
   @override
   void initState() {
     super.initState();
-    installWebAdminDebugSink(_log.append);
+    // JS  sink 已由 [MapHomeScreen.initState] 提早安裝，此處僅訂閱更新 UI。
     _log.addListener(_onLog);
   }
 
@@ -41,7 +40,6 @@ class _AdminWebActionDebugPanelState extends State<AdminWebActionDebugPanel> {
   @override
   void dispose() {
     _log.removeListener(_onLog);
-    uninstallWebAdminDebugSink();
     _scroll.dispose();
     super.dispose();
   }

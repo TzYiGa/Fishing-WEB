@@ -17,6 +17,7 @@ import "package:fishing_map/widgets/admin_web_action_debug_panel.dart";
 import "package:fishing_map/widgets/mapbox_interaction_overlay.dart";
 import "package:fishing_map/widgets/spot_category_filter_panel.dart";
 import "package:fishing_map/services/web_action_debug_log.dart";
+import "package:fishing_map/widgets/web_admin_debug_sink.dart";
 import "package:fishing_map/widgets/spot_detail_sheet.dart";
 import "package:firebase_auth/firebase_auth.dart";
 import "package:flutter/foundation.dart";
@@ -77,6 +78,11 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   @override
   void initState() {
     super.initState();
+    // 須早於子樹（MapboxWebCanvas）內向 JS 送 create/update，否則 fmpDbg 尚無 globalThis.fishingMapDartDebug。
+    if (kIsWeb) {
+      installWebAdminDebugSink(WebActionDebugLog.instance.append);
+      WebActionDebugLog.instance.append("[MapHome] web JS debug sink installed (early)");
+    }
     _spots = widget.repo.spotsSnapshotIfLoaded();
     widget.settingsListenable.addListener(_persistSettingsForUser);
     widget.auth.guestModeListenable.addListener(_onGuestModeChanged);
@@ -218,6 +224,9 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     _spotsSub?.cancel();
     widget.settingsListenable.removeListener(_persistSettingsForUser);
     widget.auth.guestModeListenable.removeListener(_onGuestModeChanged);
+    if (kIsWeb) {
+      uninstallWebAdminDebugSink();
+    }
     super.dispose();
   }
 

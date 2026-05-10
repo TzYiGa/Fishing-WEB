@@ -1,0 +1,11 @@
+---
+description: Web／Mapbox 與資料管線異常排解時務必可追溯
+globs: lib/**/* web/**/*.js
+alwaysApply: false
+---
+
+# DEBUG 紀錄慣例
+
+- 異動 Web Mapbox bridge（`web/mapbox_gl_bridge.js`）時，對關鍵路徑維持或補齊 **`fmpDbg(...)`**，讓 Flutter 側 `WebActionDebugLog` 能收到 JS 語意（與 Dart 並陳）。
+- 異動 `MapboxWebCanvas`、Map 首頁海流／預載、或會影響 `fishingMapCreate`/`fishingMapUpdate` 傳參的的 Dart 時，以 **`WebActionDebugLog.instance.append("[tag] …")`** 紀錄可辨識的狀態（開關、字串長度、錯誤），避免僅無聲 fail。
+- 若新增需在 **JS 執行前**就把訊息送回 Dart 的流程，請確保對應的 **`installWebAdminDebugSink`** 早於第一款 platform view／bridge 呼叫（目前由 **`MapHomeScreen.initState`** 負責）。
