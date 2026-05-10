@@ -603,6 +603,10 @@
   const WF_GRID_N = 96;
   /** T_sim：固定物理步長（秒），以 CFL 子步滿足 |u|·dt / Δcell < 1 */
   const WF_DT_SIM = 1.72;
+  /** RAF 牆鐘時間 → 模擬秒縮放（海流 m/s 級別需放大才明顯）；console: `globalThis.FISHING_FLOW_ANIM_FACTOR=120` */
+  const WF_ANIM_FACTOR_DEFAULT = 96;
+  /** true 時每一 slice 印 [wf.advance]（量大）；通常只開 [wf.tick] */
+  const WF_ADV_VERBOSE_FLAG = "FISHING_FLOW_VERBOSE_DEBUG";
   const WF_PARTICLE_N = 840;
   const WF_REF_ZOOM = 7.5;
   const WF_FADE_ALPHA = 0.94;
@@ -615,6 +619,22 @@
   const WF_DBG_GRID = 4;
   const WF_DBG_NO_FADE = 8;
   const WF_DBG_NEAREST = 16;
+
+  function wfAnimFactor() {
+    if (typeof globalThis === "undefined") return WF_ANIM_FACTOR_DEFAULT;
+    const v = globalThis.FISHING_FLOW_ANIM_FACTOR;
+    if (v === undefined || v === null || Number.isNaN(Number(v))) {
+      return WF_ANIM_FACTOR_DEFAULT;
+    }
+    return Math.max(8, Math.min(720, Number(v)));
+  }
+
+  function wfFlowAdvVerbose() {
+    return (
+      typeof globalThis !== "undefined" &&
+      globalThis[WF_ADV_VERBOSE_FLAG] === true
+    );
+  }
 
   function wfHashStr(s) {
     let h = 2166136261 >>> 0;
@@ -1045,12 +1065,49 @@
       if (nSub > 64) nSub = 64;
     }
     const h = dtLogical / nSub;
+    if (wfFlowAdvVerbose()) {
+      let zDbg = "?";
+      try {
+        zDbg = map.getZoom().toFixed(2);
+      } catch (_) {}
+      fmpDbg(
+        "[wf.advance] dtLogical=" +
+          dtLogical.toFixed(6) +
+          " nSub=" +
+          String(nSub) +
+          " h=" +
+          h.toFixed(8) +
+          " dtSafe=" +
+          dtSafe.toFixed(6) +
+          " vmax=" +
+          vmax.toFixed(4) +
+          " z=" +
+          zDbg
+      );
+    }
     const dbgN = (w.debugMask & WF_DBG_NEAREST) !== 0;
+    let p0aLng = NaN;
+    let p0aLat = NaN;
+    if (wfFlowAdvVerbose()) {
+      p0aLng = w.lngs[0];
+      p0aLat = w.lats[0];
+    }
     for (let s = 0; s < nSub; s++) {
       const zg = wfZoomCompensation(map);
       for (let i = 0; i < WF_PARTICLE_N; i++) {
         wfStepParticle(w, item, i, h, tau, zg, dbgN);
       }
+    }
+    if (wfFlowAdvVerbose()) {
+      const dbLng = Math.abs(w.lngs[0] - p0aLng);
+      const dbLat = Math.abs(w.lats[0] - p0aLat);
+
+      fmpDbg(
+        "[wf.advance.p0Δ] Δlng≈" +
+          dbLng.toExponential(3) +
+          " Δlat≈" +
+          dbLat.toExponential(3)
+      );
     }
     if ((w.frameId & 7) === 0) wfRecomputeOcc(w);
     w.frameId++;
@@ -1229,7 +1286,6 @@
         max_ages: new Float32Array(WF_PARTICLE_N),
         rng,
         occ: wfOccupancyBins(grid, 28, 22),
-        simAccum: 0,
         lastTs: typeof performance !== "undefined" ? performance.now() : 0,
         raf: null,
         frameId: 0,
@@ -1286,7 +1342,6 @@
 
     if (wf.raf == null) {
       wf.lastTs = typeof performance !== "undefined" ? performance.now() : 0;
-      wf.simAccum = 0;
       const tick = function (now) {
         if (!maps[item.containerId] || maps[item.containerId] !== item) {
           wfDestroyFlowRenderer(item);
@@ -1318,14 +1373,62 @@
           wf2.prev_lats[pi] = wf2.lats[pi];
         }
 
-        // T_sim catch-up（與 RAF 解耦；render 只吃最新粒子狀態）
-        wf2.simAccum += dtWall;
-        const maxLag = WF_DT_SIM * 6;
-        if (wf2.simAccum > maxLag) wf2.simAccum = maxLag;
-        while (wf2.simAccum >= WF_DT_SIM) {
-          wf2.simAccum -= WF_DT_SIM;
-          wfAdvancePhysics(wf2, item, WF_DT_SIM, tau);
+        // 先前用 simAccum 累到 WF_DT_SIM 才跑一次 → 數百幀才動一次、dλ 過小肉眼像卡住。
+        // 改為每幀將牆鐘 × WF_ANIM_FACTOR 切成多段 WF_DT_SIM 調用 wfAdvancePhysics。
+        const fac = wfAnimFactor();
+        const rawWall =
+          dtWall > 1e-7 ? dtWall : 1 / 120;
+        let simRem = rawWall * fac;
+        simRem = Math.min(
+          Math.max(simRem, WF_DT_SIM * 0.04),
+          WF_DT_SIM * 48,
+        );
+        const simAtTickStart = simRem;
+
+        let advSlices = 0;
+
+        while (simRem > 1e-12) {
+          const slice = Math.min(WF_DT_SIM, simRem);
+          wfAdvancePhysics(wf2, item, slice, tau);
+          simRem -= slice;
+          advSlices++;
+          if (advSlices > 5000) {
+            fmpDbg("[wf.tick] abort advSlices cap rem=" + String(simRem));
+            break;
+          }
         }
+
+        let zTxt = "?";
+        try {
+          zTxt = map.getZoom().toFixed(2);
+        } catch (_) {}
+        let mSum = 0;
+        let mN = 0;
+        const mStep = Math.max(1, (WF_PARTICLE_N / 48) | 0);
+        for (let mj = 0; mj < WF_PARTICLE_N; mj += mStep) {
+          mSum +=
+            Math.abs(wf2.lngs[mj] - wf2.prev_lngs[mj]) +
+            Math.abs(wf2.lats[mj] - wf2.prev_lats[mj]);
+          mN++;
+        }
+
+        fmpDbg(
+          "[wf.tick] dtWall=" +
+            dtWall.toFixed(6) +
+            " animFac=" +
+            String(fac) +
+            " simRemClamped(start)=" +
+            simAtTickStart.toFixed(4) +
+            " slicesDone=" +
+            String(advSlices) +
+            " mean|dλ|+|dφ|=" +
+            (mN ? (mSum / mN).toExponential(4) : "0") +
+            " z=" +
+            zTxt +
+            " (slice debug: globalThis." +
+            WF_ADV_VERBOSE_FLAG +
+            "=true)"
+        );
 
         const noFade = (wf2.debugMask & WF_DBG_NO_FADE) !== 0;
         if (!noFade) {
