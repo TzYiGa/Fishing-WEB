@@ -3,10 +3,13 @@ import "dart:convert";
 
 import "package:cached_network_image/cached_network_image.dart";
 import "package:fishing_map/models/fishing_spot.dart";
+import "package:fishing_map/models/map_view_settings.dart";
 import "package:fishing_map/models/spot_category.dart";
 import "package:fishing_map/models/spot_comment.dart";
+import "package:fishing_map/models/spot_entry_kind.dart";
 import "package:fishing_map/services/auth_service.dart";
 import "package:fishing_map/services/spot_repository.dart";
+import "package:fishing_map/widgets/edit_spot_sheet.dart";
 import "package:fishing_map/widgets/mapbox_interaction_overlay.dart";
 import "package:fishing_map/widgets/spot_environment_card.dart";
 import "package:fishing_map/utils/relative_time_zh.dart";
@@ -18,17 +21,20 @@ class SpotDetailSheet extends StatefulWidget {
     required this.spot,
     required this.repo,
     required this.auth,
+    required this.mapLanguage,
   });
 
   final FishingSpot spot;
   final SpotRepository repo;
   final AuthService auth;
+  final MapLabelLanguage mapLanguage;
 
   static void open(
     BuildContext context, {
     required FishingSpot spot,
     required SpotRepository repo,
     required AuthService auth,
+    required MapLabelLanguage mapLanguage,
   }) {
     final size = MediaQuery.sizeOf(context);
     final screenW = size.width;
@@ -58,7 +64,12 @@ class SpotDetailSheet extends StatefulWidget {
               height: finiteH,
               child: Padding(
                 padding: EdgeInsets.only(bottom: MediaQuery.paddingOf(ctx).bottom),
-                child: SpotDetailSheet(spot: spot, repo: repo, auth: auth),
+                child: SpotDetailSheet(
+                  spot: spot,
+                  repo: repo,
+                  auth: auth,
+                  mapLanguage: mapLanguage,
+                ),
               ),
             ),
           );
@@ -77,10 +88,12 @@ class _SpotDetailSheetState extends State<SpotDetailSheet> {
   String? _error;
   Timer? _relativeTimeTicker;
   bool? _bootstrapAdmin;
+  late FishingSpot _spot;
 
   @override
   void initState() {
     super.initState();
+    _spot = widget.spot;
     _relativeTimeTicker = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
@@ -110,7 +123,7 @@ class _SpotDetailSheetState extends State<SpotDetailSheet> {
     });
     try {
       await widget.repo.addComment(
-        spotId: widget.spot.id,
+        spotId: _spot.id,
         comment: SpotComment(
           id: "",
           text: trim,
@@ -153,11 +166,69 @@ class _SpotDetailSheetState extends State<SpotDetailSheet> {
     try {
       final admin = await widget.auth.isCurrentUserAdmin();
       await widget.repo.deleteComment(
-        spotId: widget.spot.id,
+        spotId: _spot.id,
         commentId: c.id,
         requesterUserId: u.uid,
         requesterIsAdmin: admin,
       );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString())),
+        );
+      }
+    }
+  }
+
+  Future<void> _openEdit() async {
+    final updated = await EditSpotSheet.open(
+      context,
+      spot: _spot,
+      repo: widget.repo,
+      auth: widget.auth,
+      mapLanguage: widget.mapLanguage,
+    );
+    if (updated != null && mounted) setState(() => _spot = updated);
+  }
+
+  Future<void> _confirmAndDeleteSpot() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("刪除釣點"),
+        content: const Text("確定要刪除此釣點嗎？此動作無法復原。"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("取消"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
+            ),
+            child: const Text("刪除"),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final u = widget.auth.currentUser;
+    if (u == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("請先登入")),
+      );
+      return;
+    }
+    try {
+      final admin = await widget.auth.isCurrentUserAdmin();
+      await widget.repo.deleteSpot(
+        spotId: _spot.id,
+        requesterUserId: u.uid,
+        requesterIsAdmin: admin,
+      );
+      if (mounted) Navigator.of(context).pop();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -184,38 +255,95 @@ class _SpotDetailSheetState extends State<SpotDetailSheet> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    widget.spot.name,
-                    style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _spot.name,
+                          style: theme.textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.bold,
+                              ),
+                        ),
+                      ),
+                      StreamBuilder<bool>(
+                        stream: widget.auth.adminChanges,
+                        initialData: false,
+                        builder: (ctx, adminSnap) {
+                          final isAdmin =
+                              adminSnap.data == true || _bootstrapAdmin == true;
+                          final uid = widget.auth.currentUser?.uid;
+                          final canManage =
+                              uid != null && (uid == _spot.userId || isAdmin);
+                          if (!canManage) return const SizedBox.shrink();
+                          return Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: "編輯釣點",
+                                icon: Icon(Icons.edit_outlined, color: theme.colorScheme.primary),
+                                onPressed: _openEdit,
+                              ),
+                              IconButton(
+                                tooltip: "刪除釣點",
+                                icon: Icon(
+                                  Icons.delete_outline_rounded,
+                                  color: theme.colorScheme.error,
+                                ),
+                                onPressed: _confirmAndDeleteSpot,
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 6),
                   Align(
                     alignment: Alignment.centerLeft,
-                    child: Chip(
-                      label: Text(spotCategoryLabelResolved(widget.spot.categoryId)),
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final cid in _spot.categoryIds)
+                          Chip(
+                            label: Text(spotCategoryLabelResolved(cid)),
+                            visualDensity: VisualDensity.compact,
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        Chip(
+                          label: Text(
+                            _spot.entryKind == SpotEntryKind.conditionShare
+                                ? "釣況分享"
+                                : "固定釣點",
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(height: 12),
-                  SpotEnvironmentCard(spot: widget.spot),
+                  SpotEnvironmentCard(spot: _spot),
                   const SizedBox(height: 12),
                   Text(
-                    widget.spot.description.isEmpty ? "尚未填寫描述" : widget.spot.description,
+                    _spot.description.isEmpty ? "尚未填寫描述" : _spot.description,
                     style: theme.textTheme.bodyMedium,
                   ),
                   const SizedBox(height: 16),
-                  if (widget.spot.photoUrls.isNotEmpty) ...[
+                  if (_spot.photoUrls.isNotEmpty) ...[
                     Text("照片", style: theme.textTheme.titleSmall),
                     const SizedBox(height: 8),
                     SizedBox(
                       height: 120,
                       child: ListView.separated(
                         scrollDirection: Axis.horizontal,
-                        itemCount: widget.spot.photoUrls.length,
+                        itemCount: _spot.photoUrls.length,
                         separatorBuilder: (_, __) => const SizedBox(width: 10),
                         itemBuilder: (_, i) {
-                          final url = widget.spot.photoUrls[i];
+                          final url = _spot.photoUrls[i];
                           return ClipRRect(
                             borderRadius: BorderRadius.circular(8),
                             child: AspectRatio(
@@ -258,7 +386,7 @@ class _SpotDetailSheetState extends State<SpotDetailSheet> {
                 ),
                 Expanded(
                   child: StreamBuilder<List<SpotComment>>(
-                    stream: widget.repo.watchComments(widget.spot.id),
+                    stream: widget.repo.watchComments(_spot.id),
                     builder: (ctx, snap) {
                       if (!snap.hasData) {
                         return const Center(child: CircularProgressIndicator());

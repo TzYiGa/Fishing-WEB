@@ -11,6 +11,9 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
+  // TODO(REMOVE): 開發省事，空白郵件自動帶入；上線前刪除此常數與下方邏輯。
+  static const _kDevDefaultEmailIfBlank = "admin@a.com";
+
   final _email = TextEditingController();
   final _password = TextEditingController();
   final _formKey = GlobalKey<FormState>();
@@ -27,15 +30,18 @@ class _AuthScreenState extends State<AuthScreen> {
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+    final email = _email.text.trim().isEmpty
+        ? _kDevDefaultEmailIfBlank
+        : _email.text.trim();
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
       if (_register) {
-        await widget.auth.registerWithEmail(_email.text.trim(), _password.text);
+        await widget.auth.registerWithEmail(email, _password.text);
       } else {
-        await widget.auth.signInWithEmail(_email.text.trim(), _password.text);
+        await widget.auth.signInWithEmail(email, _password.text);
       }
     } catch (e) {
       setState(() => _error = e.toString());
@@ -76,8 +82,8 @@ class _AuthScreenState extends State<AuthScreen> {
                     ),
                     keyboardType: TextInputType.emailAddress,
                     validator: (v) {
-                      if (v == null || v.trim().isEmpty) return "必填";
-                      if (!v.contains("@")) return "格式不正確";
+                      final t = v?.trim() ?? "";
+                      if (t.isNotEmpty && !t.contains("@")) return "格式不正確";
                       return null;
                     },
                   ),

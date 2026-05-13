@@ -1,6 +1,7 @@
 import "dart:convert";
 import "dart:math" as math;
 
+import "package:fishing_map/config/ocean_vectors_remote_url.dart";
 import "package:flutter/services.dart";
 import "package:http/http.dart" as http;
 
@@ -10,10 +11,11 @@ import "package:http/http.dart" as http;
 /// JSON 格式：`[{ "lat", "lng", "u", "v" }, ...]`（`u`/`v` 為 m/s，東向／北向）。
 ///
 /// 資料來源（優先序）：
-/// 1. 編譯參數 **`OCEAN_VECTORS_JSON_URL`** 非空時，執行期 `GET` 該 URL（便於 CI 更新後由 CDN／raw 提供最新檔）。
-/// 2. 否則讀 **`assets/data/copernicus_ocean_vectors.json`**（可由本機腳本或 GitHub Actions 定期寫入）。
+/// 1. 編譯參數 **`OCEAN_VECTORS_JSON_URL`** 非空時，執行期 `GET` 該 URL（便於 CI 更新後由 CDN／Storage 提供最新檔）。
+/// 2. 否則若 [kOceanVectorsRemoteJsonUrl] 非空，則 `GET` 該固定公開 URL（本專案預設為 Firebase Storage）。
+/// 3. 否則讀 **`assets/data/copernicus_ocean_vectors.json`**（可由本機腳本或 GitHub Actions 寫入倉庫）。
 ///
-/// 自動化排程：`.github/workflows/update-copernicus-ocean-vectors.yml`
+/// 自動化排程與上傳：`.github/workflows/update-copernicus-ocean-vectors.yml`
 class CopernicusOceanVectorService {
   CopernicusOceanVectorService({http.Client? httpClient}) : _http = httpClient ?? http.Client();
 
@@ -35,10 +37,14 @@ class CopernicusOceanVectorService {
 
   /// 讀取向量表（URL 或資產）並編成 GeoJSON 字串。
   Future<String> buildFeatureCollectionJson() async {
-    final url = vectorsJsonUrlFromEnvironment.trim();
-    if (url.isNotEmpty) {
+    final envUrl = vectorsJsonUrlFromEnvironment.trim();
+    final remoteUrl = envUrl.isNotEmpty
+        ? envUrl
+        : kOceanVectorsRemoteJsonUrl.trim();
+    if (remoteUrl.isNotEmpty) {
       try {
-        final res = await _http.get(Uri.parse(url)).timeout(const Duration(seconds: 28));
+        final res =
+            await _http.get(Uri.parse(remoteUrl)).timeout(const Duration(seconds: 28));
         if (res.statusCode == 200 && res.body.trim().isNotEmpty) {
           return _vectorsJsonToFeatureCollection(res.body);
         }

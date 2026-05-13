@@ -3,6 +3,7 @@ import "package:fishing_map/models/cwa_station_kind.dart";
 import "package:fishing_map/models/cwa_station_point.dart";
 import "package:fishing_map/models/fishing_spot.dart";
 import "package:fishing_map/models/spot_category.dart";
+import "package:fishing_map/models/spot_entry_kind.dart";
 import "package:fishing_map/models/map_view_settings.dart";
 import "package:fishing_map/widgets/cwa_map_marker_assets.dart";
 import "package:flutter/foundation.dart";
@@ -158,7 +159,9 @@ class FishingMapView extends StatelessWidget {
                     child: GestureDetector(
                       onTap: () => onSpotTap(s),
                       child: Icon(
-                        Icons.place,
+                        s.entryKind == SpotEntryKind.fishingPoi
+                            ? Icons.flag_circle_rounded
+                            : Icons.photo_camera_rounded,
                         color: spotCategoryMapMarkerColor(s.categoryId),
                         size: 40,
                       ),

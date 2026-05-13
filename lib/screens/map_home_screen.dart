@@ -1,13 +1,19 @@
 import "dart:async";
 
+import "package:fishing_map/app_version.dart";
 import "package:fishing_map/data/cwa_station_loader.dart";
 import "package:fishing_map/services/copernicus_ocean_vector_service.dart";
 import "package:fishing_map/models/cwa_station_point.dart";
+import "package:fishing_map/models/spot_entry_kind.dart";
 import "package:fishing_map/models/fishing_spot.dart";
 import "package:fishing_map/models/spot_category.dart";
 import "package:fishing_map/models/map_view_settings.dart";
+import "package:fishing_map/screens/admin_spot_review_screen.dart";
+import "package:fishing_map/screens/admin_users_screen.dart";
+import "package:fishing_map/services/admin_auth_api.dart";
 import "package:fishing_map/screens/auth_popup_panel.dart";
 import "package:fishing_map/screens/map_settings_screen.dart";
+import "package:fishing_map/screens/member_screen.dart";
 import "package:fishing_map/services/auth_service.dart";
 import "package:fishing_map/services/spot_repository.dart";
 import "package:fishing_map/services/user_settings_repository.dart";
@@ -19,6 +25,7 @@ import "package:fishing_map/widgets/spot_category_filter_panel.dart";
 import "package:fishing_map/services/web_action_debug_log.dart";
 import "package:fishing_map/widgets/web_admin_debug_sink.dart";
 import "package:fishing_map/widgets/spot_detail_sheet.dart";
+import "package:fishing_map/widgets/spot_search_bar.dart";
 import "package:firebase_auth/firebase_auth.dart";
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
@@ -49,7 +56,9 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
 
   final _mapCtrl = MapController();
   final _settingsRepo = UserSettingsRepository();
-  bool _pickMode = false;
+  late final AdminAuthApi _adminAuthApi = AdminAuthApi();
+  /// 非 null 時：地圖點選會建立該類型（釣況分享／固定釣點）。
+  SpotEntryKind? _pickKind;
   StreamSubscription<User?>? _authSub;
   StreamSubscription<List<FishingSpot>>? _spotsSub;
   List<FishingSpot> _spots = const [];
@@ -65,15 +74,27 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
   /// T_data 與仿真／繪製共用之 τ∈[0,1]（時間線性插值）。
   double _oceanFlowTau = 0;
   final _oceanVectors = CopernicusOceanVectorService();
+  static const Duration _oceanAutoRefreshInterval = Duration(minutes: 30);
+  Timer? _oceanAutoRefresh;
   ExpansibleController? _filterExpansionController;
   bool _filterPanelExpanded = false;
+  final TextEditingController _spotSearchCtrl = TextEditingController();
   /// 白名單：僅顯示勾選之類型對應的釣點。
   Set<String> _visibleCategoryIds = {for (final o in kSpotCategoryOptions) o.id};
+  bool _addMenuOpen = false;
   String? _activeUid;
   bool _applyingRemoteSettings = false;
 
-  List<FishingSpot> get _visibleSpots =>
-      _spots.where((s) => _visibleCategoryIds.contains(s.categoryId)).toList();
+  List<FishingSpot> get _visibleSpots {
+    final q = _spotSearchCtrl.text.trim().toLowerCase();
+    return _spots.where((s) {
+      if (!s.showsOnPublicMap) return false;
+      if (!s.matchesCategoryFilter(_visibleCategoryIds)) return false;
+      if (q.isEmpty) return true;
+      return s.name.toLowerCase().contains(q) ||
+          s.description.toLowerCase().contains(q);
+    }).toList();
+  }
 
   @override
   void initState() {
@@ -135,6 +156,16 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
             _oceanFlowJsonT0 = CopernicusOceanVectorService.emptyFeatureCollectionJson,
       );
     }
+  }
+
+  void _syncOceanAutoRefreshTimer() {
+    _oceanAutoRefresh?.cancel();
+    _oceanAutoRefresh = null;
+    if (!_showOceanCurrent || !kIsWeb) return;
+    _oceanAutoRefresh = Timer.periodic(_oceanAutoRefreshInterval, (_) {
+      if (!mounted || !_showOceanCurrent || !kIsWeb) return;
+      unawaited(_refreshOceanFlowField());
+    });
   }
 
   Future<void> _loadCwaStations() async {
@@ -220,6 +251,8 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
       popMapboxInteractionBlock();
     }
     _filterExpansionController?.dispose();
+    _spotSearchCtrl.dispose();
+    _oceanAutoRefresh?.cancel();
     _authSub?.cancel();
     _spotsSub?.cancel();
     widget.settingsListenable.removeListener(_persistSettingsForUser);
@@ -230,38 +263,125 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
     super.dispose();
   }
 
-  Future<void> _togglePickMode(BuildContext ctx) async {
+  Future<void> _beginPickKind(BuildContext ctx, SpotEntryKind kind) async {
     if (widget.auth.currentUser == null) {
       ScaffoldMessenger.of(ctx).showSnackBar(
-        const SnackBar(content: Text("請先登入再加入釣點")),
+        const SnackBar(content: Text("請先登入")),
       );
       return;
     }
-    setState(() => _pickMode = !_pickMode);
-    if (_pickMode && ctx.mounted) {
-      ScaffoldMessenger.of(ctx).showSnackBar(
-        const SnackBar(
-          behavior: SnackBarBehavior.floating,
-          content: Text("在地圖上點選釣點位置"),
-          duration: Duration(seconds: 6),
-        ),
+    setState(() {
+      _pickKind = kind;
+      _addMenuOpen = false;
+    });
+    if (!ctx.mounted) return;
+    final hint = kind == SpotEntryKind.conditionShare
+        ? "在地圖上點選要分享的位置"
+        : "在地圖上點選固定釣點位置";
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        content: Text(hint),
+        duration: const Duration(seconds: 6),
+      ),
+    );
+  }
+
+  void _cancelPick() {
+    setState(() {
+      _pickKind = null;
+      _addMenuOpen = false;
+    });
+  }
+
+  Widget _buildQuickAddFab(BuildContext context) {
+    if (_pickKind != null) {
+      return FloatingActionButton.extended(
+        heroTag: "fab_cancel_pick",
+        onPressed: _cancelPick,
+        icon: const Icon(Icons.close_rounded),
+        label: const Text("取消選點"),
       );
     }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 260),
+          transitionBuilder: (child, animation) {
+            return FadeTransition(
+              opacity: animation,
+              child: SizeTransition(
+                sizeFactor: animation,
+                axisAlignment: 1,
+                child: child,
+              ),
+            );
+          },
+          child: _addMenuOpen
+              ? Column(
+                  key: const ValueKey("fab_add_open"),
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    FloatingActionButton.extended(
+                      heroTag: "fab_condition_share",
+                      onPressed: () =>
+                          _beginPickKind(context, SpotEntryKind.conditionShare),
+                      icon: const Icon(Icons.photo_camera_rounded),
+                      label: const Text("釣況分享"),
+                    ),
+                    const SizedBox(height: 10),
+                    FloatingActionButton.extended(
+                      heroTag: "fab_fishing_poi",
+                      onPressed: () =>
+                          _beginPickKind(context, SpotEntryKind.fishingPoi),
+                      icon: const Icon(Icons.flag_circle_rounded),
+                      label: const Text("新增固定釣點"),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                )
+              : const SizedBox.shrink(key: ValueKey("fab_add_closed")),
+        ),
+        FloatingActionButton(
+          heroTag: "fab_add_toggle",
+          onPressed: () => setState(() => _addMenuOpen = !_addMenuOpen),
+          child: AnimatedRotation(
+            duration: const Duration(milliseconds: 220),
+            turns: _addMenuOpen ? 0.125 : 0,
+            child: const Icon(Icons.add_rounded),
+          ),
+        ),
+      ],
+    );
   }
 
   Future<void> _onMapPick(LatLng latlng, BuildContext ctx) async {
-    if (!_pickMode) return;
-    setState(() => _pickMode = false);
+    final kind = _pickKind;
+    if (kind == null) return;
+    setState(() => _pickKind = null);
     if (!mounted) return;
-    final ok = await AddSpotSheet.open(
+    final outcome = await AddSpotSheet.open(
       ctx,
       pick: latlng,
       repo: widget.repo,
       auth: widget.auth,
       mapLanguage: widget.settingsListenable.value.language,
+      entryKind: kind,
     );
-    if (!mounted || ok != true) return;
-    ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text("已新增釣點")));
+    if (!mounted || outcome == null) return;
+    final msg = switch (outcome) {
+      AddSpotSheetOutcome.conditionSharePublished => "已發布釣況分享",
+      AddSpotSheetOutcome.fishingPoiSubmittedPending =>
+        "固定釣點已提交審核，核准後會顯示於地圖",
+      AddSpotSheetOutcome.fishingPoiPublishedApproved =>
+        "固定釣點已建立並顯示於地圖",
+    };
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -276,7 +396,7 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
 
   Widget _fishingMapFill() {
     return FishingMapView(
-      pickMode: _pickMode,
+      pickMode: _pickKind != null,
       mapController: _mapCtrl,
       spots: _visibleSpots,
       cwaStations: _cwaStations,
@@ -287,8 +407,13 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
       oceanFlowGeoJsonT1: _oceanFlowJsonT1,
       oceanFlowDataTau: _oceanFlowTau,
       settingsListenable: widget.settingsListenable,
-      onSpotTap: (s) =>
-          SpotDetailSheet.open(context, spot: s, repo: widget.repo, auth: widget.auth),
+      onSpotTap: (s) => SpotDetailSheet.open(
+          context,
+          spot: s,
+          repo: widget.repo,
+          auth: widget.auth,
+          mapLanguage: widget.settingsListenable.value.language,
+        ),
       onTapAt: (lng) => _onMapPick(lng, context),
     );
   }
@@ -302,6 +427,9 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
         final sideMaxH = constraints.maxHeight > 120
             ? (constraints.maxHeight - 16).clamp(120.0, double.infinity)
             : 280.0;
+        final narrow = constraints.maxWidth < 420;
+        final searchTop = narrow ? 120.0 : 8.0;
+        final searchLeft = narrow ? (safeLeft + 8) : (safeLeft + 288);
         return Stack(
           fit: StackFit.expand,
           clipBehavior: Clip.none,
@@ -335,9 +463,21 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                         if (v && kIsWeb) {
                           unawaited(_refreshOceanFlowField());
                         }
+                        _syncOceanAutoRefreshTimer();
                       },
                     ),
                   ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: searchLeft,
+              right: 8,
+              top: searchTop,
+              child: PointerInterceptor(
+                child: SpotSearchBar(
+                  controller: _spotSearchCtrl,
+                  onChanged: (_) => setState(() {}),
                 ),
               ),
             ),
@@ -397,7 +537,19 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 if (v && kIsWeb) {
                   unawaited(_refreshOceanFlowField());
                 }
+                _syncOceanAutoRefreshTimer();
               },
+            ),
+          ),
+        ),
+        Positioned(
+          top: 8,
+          left: 8 + safeLeft + 288,
+          right: 8,
+          child: PointerInterceptor(
+            child: SpotSearchBar(
+              controller: _spotSearchCtrl,
+              onChanged: (_) => setState(() {}),
             ),
           ),
         ),
@@ -420,12 +572,84 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 stream: widget.auth.adminChanges,
                 builder: (context, snapshot) {
                   if (snapshot.data != true) return const SizedBox.shrink();
+                  final scheme = Theme.of(context).colorScheme;
                   return Padding(
                     padding: const EdgeInsets.only(right: 4),
-                    child: Chip(
-                      avatar: const Icon(Icons.verified_user_rounded, size: 16),
-                      label: const Text("管理員"),
-                      visualDensity: VisualDensity.compact,
+                    child: PopupMenuButton<String>(
+                      tooltip: "管理員",
+                      offset: const Offset(0, 44),
+                      onSelected: (value) {
+                        if (!context.mounted) return;
+                        if (value == "users") {
+                          Navigator.of(context).push<void>(
+                            MaterialPageRoute<void>(
+                              builder: (ctx) => AdminUsersScreen(
+                                settingsRepo: _settingsRepo,
+                                adminAuthApi: _adminAuthApi,
+                              ),
+                            ),
+                          );
+                        } else if (value == "spot_review") {
+                          Navigator.of(context).push<void>(
+                            MaterialPageRoute<void>(
+                              builder: (ctx) => AdminSpotReviewScreen(
+                                repo: widget.repo,
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                      itemBuilder: (ctx) => [
+                        const PopupMenuItem<String>(
+                          value: "users",
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            leading: Icon(Icons.people_outline_rounded),
+                            title: Text("使用者資料"),
+                            subtitle: Text(
+                              "Auth（Admin SDK）與 Firestore 使用者資料",
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ),
+                        const PopupMenuItem<String>(
+                          value: "spot_review",
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            leading: Icon(Icons.fact_check_outlined),
+                            title: Text("固定釣點審核"),
+                            subtitle: Text(
+                              "核准或拒絕會員提交的固定釣點",
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ),
+                      ],
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.verified_user_rounded,
+                              size: 18,
+                              color: scheme.primary,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              "管理員",
+                              style: Theme.of(context).textTheme.labelLarge,
+                            ),
+                            Icon(
+                              Icons.arrow_drop_down_rounded,
+                              size: 22,
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   );
                 },
@@ -453,6 +677,25 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
                 ),
               ),
             ],
+          ),
+          StreamBuilder<User?>(
+            stream: widget.auth.authChanges,
+            builder: (context, snapshot) {
+              if (snapshot.data == null) {
+                return const SizedBox.shrink();
+              }
+              return IconButton(
+                tooltip: "會員",
+                icon: const Icon(Icons.person_outline_rounded),
+                onPressed: () {
+                  Navigator.of(context).push<void>(
+                    MaterialPageRoute<void>(
+                      builder: (ctx) => MemberScreen(auth: widget.auth),
+                    ),
+                  );
+                },
+              );
+            },
           ),
           ValueListenableBuilder<bool>(
             valueListenable: widget.auth.guestModeListenable,
@@ -517,25 +760,42 @@ class _MapHomeScreenState extends State<MapHomeScreen> {
           const SizedBox(width: 4),
         ],
       ),
-      body: kIsWeb
-          ? StreamBuilder<bool>(
-              stream: widget.auth.adminChanges,
-              builder: (context, adminSnap) {
-                return Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    _buildWebBody(context, safeLeft),
-                    if (adminSnap.data == true) const AdminWebActionDebugPanel(),
-                  ],
-                );
-              },
-            )
-          : _buildNonWebBody(safeLeft),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _togglePickMode(context),
-        icon: Icon(_pickMode ? Icons.close_rounded : Icons.add_location_alt_outlined),
-        label: Text(_pickMode ? "取消選點" : "新增釣點"),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          kIsWeb
+              ? StreamBuilder<bool>(
+                  stream: widget.auth.adminChanges,
+                  builder: (context, adminSnap) {
+                    return Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _buildWebBody(context, safeLeft),
+                        if (adminSnap.data == true) const AdminWebActionDebugPanel(),
+                      ],
+                    );
+                  },
+                )
+              : _buildNonWebBody(safeLeft),
+          IgnorePointer(
+            child: Align(
+              alignment: Alignment.bottomRight,
+              child: Padding(
+                // 右下留出空間給 Mapbox logo／attribution（Flutter 疊在圖上時易重疊）。
+                padding: const EdgeInsets.only(right: 156, bottom: 14),
+                child: Opacity(
+                  opacity: 0.35,
+                  child: Text(
+                    "v$kAppVersion",
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
+      floatingActionButton: _buildQuickAddFab(context),
     );
   }
 }

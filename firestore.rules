@@ -2,34 +2,128 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /spots/{spotId} {
-      allow read: if true;
-      allow create: if request.auth != null &&
-        request.resource.data.userId == request.auth.uid &&
-        request.resource.data.keys().hasAll([
-          'name','description','geo','userId','photoUrls','createdAt'
-        ]);
-      allow update, delete: if request.auth != null &&
-        request.auth.uid == resource.data.userId;
+      function kindLabel(data) {
+        return data.get('entryKind', 'conditionShare');
+      }
+      function moderationLabel(data) {
+        return data.get('moderationStatus', 'approved');
+      }
+      /// 釣況分享：所有人可讀。固定釣點：已核准公開，或作者／管理員可讀含待審。
+      function spotReadable(data) {
+        return kindLabel(data) == 'conditionShare' || (
+          kindLabel(data) == 'fishingPoi' && (
+            moderationLabel(data) == 'approved' ||
+            (request.auth != null && (
+              request.auth.uid == data.userId ||
+              request.auth.token.admin == true
+            ))
+          )
+        );
+      }
+      function entryKindUnchangedOrAdmin() {
+        return kindLabel(request.resource.data) == kindLabel(resource.data) ||
+          request.auth.token.admin == true;
+      }
+      function moderationUnchangedOrAdmin() {
+        return moderationLabel(request.resource.data)
+            == moderationLabel(resource.data) ||
+          request.auth.token.admin == true;
+      }
+      function createSpotValid() {
+        return request.auth != null &&
+          request.resource.data.userId == request.auth.uid &&
+          request.resource.data.keys().hasAll([
+            'name',
+            'description',
+            'geo',
+            'userId',
+            'photoUrls',
+            'createdAt',
+            'moderationStatus',
+            'entryKind',
+          ]) &&
+          (
+            (
+              request.resource.data.entryKind == 'conditionShare' &&
+              request.resource.data.moderationStatus == 'approved'
+            ) ||
+            (
+              request.resource.data.entryKind == 'fishingPoi' &&
+              (
+                (
+                  request.resource.data.moderationStatus == 'pending' &&
+                  request.auth.token.admin != true
+                ) ||
+                (
+                  request.resource.data.moderationStatus == 'approved' &&
+                  request.auth.token.admin == true
+                )
+              )
+            )
+          );
+      }
+
+      allow read: if spotReadable(resource.data);
+
+      allow create: if createSpotValid();
+
+      allow update: if request.auth != null &&
+        request.resource.data.userId == resource.data.userId &&
+        entryKindUnchangedOrAdmin() &&
+        moderationUnchangedOrAdmin() &&
+        (
+          request.auth.uid == resource.data.userId ||
+          request.auth.token.admin == true
+        );
+
+      allow delete: if request.auth != null && (
+        request.auth.uid == resource.data.userId ||
+        request.auth.token.admin == true
+      );
 
       match /comments/{commentId} {
-        allow read: if true;
+        function parentSpot() {
+          return get(/databases/$(database)/documents/spots/$(spotId)).data;
+        }
+        allow read: if spotReadable(parentSpot());
         allow create: if request.auth != null &&
+          spotReadable(parentSpot()) &&
           request.resource.data.userId == request.auth.uid &&
           request.resource.data.keys().hasAll([
             'text','userId','authorLabel','createdAt'
           ]);
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if request.auth != null && (
+          request.auth.uid == resource.data.userId ||
+          request.auth.token.admin == true
+        );
       }
     }
 
     match /users/{userId} {
-      allow read: if request.auth != null &&
-        request.auth.uid == userId;
-      allow create, update: if request.auth != null &&
-        request.auth.uid == userId &&
-        request.resource.data.keys().hasOnly([
-          'language','style','updatedAt'
+      function userDocKeysOk() {
+        return request.resource.data.keys().hasOnly([
+          'language',
+          'style',
+          'updatedAt',
+          'profileBio',
+          'profileUpdatedAt',
         ]);
+      }
+      allow read: if request.auth != null && (
+        request.auth.uid == userId ||
+        request.auth.token.admin == true
+      );
+      allow create: if request.auth != null &&
+        userDocKeysOk() && (
+          request.auth.uid == userId ||
+          request.auth.token.admin == true
+        );
+      allow update: if request.auth != null &&
+        userDocKeysOk() && (
+          request.auth.uid == userId ||
+          request.auth.token.admin == true
+        );
       allow delete: if false;
     }
   }

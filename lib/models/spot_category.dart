@@ -44,6 +44,22 @@ String spotCategoryLabelResolved(String? id) {
   return "未分類";
 }
 
+/// 依 [kSpotCategoryOptions] 順序去重；空輸入回傳 `[kDefaultSpotCategoryId]`。
+List<String> normalizeCategoryIds(Iterable<String> ids) {
+  final want = ids.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+  final out = <String>[];
+  for (final o in kSpotCategoryOptions) {
+    if (want.contains(o.id)) out.add(o.id);
+  }
+  if (out.isEmpty) return [kDefaultSpotCategoryId];
+  return out;
+}
+
+String spotCategoriesSummaryLabel(List<String> categoryIds) {
+  if (categoryIds.isEmpty) return "未分類";
+  return categoryIds.map(spotCategoryLabelResolved).join("、");
+}
+
 /// 與 `mapbox_gl_bridge.js` 單點顏色一致，供 FlutterMap 等非 Web 端標記用。
 Color spotCategoryMapMarkerColor(String categoryId) {
   return switch (categoryId) {

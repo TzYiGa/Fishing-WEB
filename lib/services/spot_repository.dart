@@ -1,151 +1,166 @@
 import "dart:async";
 import "dart:convert";
-import "dart:typed_data";
 
+import "package:cloud_firestore/cloud_firestore.dart";
 import "package:fishing_map/models/fishing_spot.dart";
-import "package:fishing_map/models/spot_category.dart";
+import "package:fishing_map/models/spot_entry_kind.dart";
+import "package:fishing_map/models/spot_moderation_status.dart";
 import "package:fishing_map/models/spot_comment.dart";
 import "package:fishing_map/models/spot_environment_snapshot.dart";
-import "package:shared_preferences/shared_preferences.dart";
+import "package:flutter/foundation.dart";
 import "package:uuid/uuid.dart";
 
-String? _trimOrNullDisk(dynamic v) {
-  if (v == null) return null;
-  final s = v.toString().trim();
-  return s.isEmpty ? null : s;
-}
-
 class SpotRepository {
-  SpotRepository() {
-    // 每次呼叫都回傳「新 async* Stream」會觸發 StreamBuilder 重綁、取消舊訂閱，
-    // 在資料 yield 前被取消時地圖會一直收到 []；F5 / 父層重建後常見此情形。
-    _watchSpotsStream = Stream<List<FishingSpot>>.multi((emitter) async {
-      await _ensureLoaded();
-      emitter.add(_sortedSpots(_spots));
-      await emitter.addStream(_spotsCtrl.stream);
-    });
+  SpotRepository({FirebaseFirestore? firestore})
+      : _db = firestore ?? FirebaseFirestore.instance {
+    _watchSpotsStream = _db
+        .collection("spots")
+        .snapshots()
+        .map((snap) {
+          final next = <FishingSpot>[];
+          for (final doc in snap.docs) {
+            try {
+              next.add(FishingSpot.fromDoc(doc));
+            } catch (e, _) {
+              if (kDebugMode) {
+                debugPrint("[SpotRepository] 解析釣點失敗(${doc.id}): $e");
+              }
+            }
+          }
+          next.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+          _spots
+            ..clear()
+            ..addAll(next);
+          _loaded = true;
+          return List<FishingSpot>.unmodifiable(next);
+        })
+        .asBroadcastStream();
   }
 
+  final FirebaseFirestore _db;
   final _uuid = const Uuid();
-  static const _spotsKey = "local.spots";
-  static const _commentsKey = "local.comments";
-
-  final _spotsCtrl = StreamController<List<FishingSpot>>.broadcast();
-  final Map<String, StreamController<List<SpotComment>>> _commentCtrls = {};
-
-  bool _loaded = false;
   final List<FishingSpot> _spots = [];
-  final Map<String, List<SpotComment>> _commentsBySpot = {};
+  bool _loaded = false;
 
   late final Stream<List<FishingSpot>> _watchSpotsStream;
 
-  /// 單例式串流引用，避免 Widget 重建時換 stream 導致載入被取消。
   Stream<List<FishingSpot>> watchSpots() => _watchSpotsStream;
 
-  /// 在 [runApp] 前呼叫，讓首屏地圖不需等 async 才讀到 SharedPreferences。
+  /// 待審核「固定釣點」（`fishingPoi` 且 `moderationStatus == pending`）。
+  Stream<List<FishingSpot>> watchPendingSpots() {
+    return _db
+        .collection("spots")
+        .where("moderationStatus", isEqualTo: SpotModerationStatus.pending.firestoreValue)
+        .snapshots()
+        .map((snap) {
+          final next = <FishingSpot>[];
+          for (final doc in snap.docs) {
+            try {
+              final s = FishingSpot.fromDoc(doc);
+              if (s.entryKind != SpotEntryKind.fishingPoi) continue;
+              next.add(s);
+            } catch (e, _) {
+              if (kDebugMode) {
+                debugPrint("[SpotRepository] 解析待審釣點失敗(${doc.id}): $e");
+              }
+            }
+          }
+          next.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+          return List<FishingSpot>.unmodifiable(next);
+        })
+        .asBroadcastStream();
+  }
+
+  /// 管理員變更審核狀態（Firestore 規則須為 admin）。
+  Future<void> setModerationStatus({
+    required String spotId,
+    required SpotModerationStatus status,
+  }) async {
+    await _db.collection("spots").doc(spotId).update({
+      "moderationStatus": status.firestoreValue,
+    }).timeout(const Duration(seconds: 20));
+  }
+
+  /// 已改為純 Firestore 流程；保留 API 以相容既有呼叫端。
   Future<void> preloadFromDisk() async {
     await _ensureLoaded();
   }
 
-  /// [preloadFromDisk]（或曾觸發過 [watchSpots]）後可讀；否則為空列表。
   List<FishingSpot> spotsSnapshotIfLoaded() {
     if (!_loaded) return const [];
-    return _sortedSpots(_spots);
+    return List<FishingSpot>.unmodifiable(_spots);
   }
 
   Future<String> createDraftSpot({
     required FishingSpot draft,
     required String userId,
+    required SpotEntryKind entryKind,
+    required SpotModerationStatus moderationStatus,
   }) async {
     await _ensureLoaded();
     final id = _uuid.v4();
-    _spots.add(
-        FishingSpot(
-        id: id,
-        lat: draft.lat,
-        lng: draft.lng,
-        name: draft.name,
-        description: draft.description,
-        userId: userId,
-        photoUrls: const [],
-        createdAt: DateTime.now(),
-        categoryId: draft.categoryId,
-        environmentAtPost: draft.environmentAtPost,
-        fishingAt: draft.fishingAt,
-        cwaLinkedTideStationId: draft.cwaLinkedTideStationId,
-        cwaLinkedTideStationNameZh: draft.cwaLinkedTideStationNameZh,
-        cwaLinkedBuoyStationId: draft.cwaLinkedBuoyStationId,
-        cwaLinkedBuoyStationNameZh: draft.cwaLinkedBuoyStationNameZh,
-        cwaLinkedStationId: draft.cwaLinkedStationId,
-        cwaLinkedStationNameZh: draft.cwaLinkedStationNameZh,
-      ),
+    final spot = FishingSpot(
+      id: id,
+      lat: draft.lat,
+      lng: draft.lng,
+      name: draft.name,
+      description: draft.description,
+      userId: userId,
+      photoUrls: const [],
+      createdAt: DateTime.now(),
+      categoryIds: draft.categoryIds,
+      entryKind: entryKind,
+      moderationStatus: moderationStatus,
+      environmentAtPost: draft.environmentAtPost,
+      fishingAt: draft.fishingAt,
+      cwaLinkedTideStationId: draft.cwaLinkedTideStationId,
+      cwaLinkedTideStationNameZh: draft.cwaLinkedTideStationNameZh,
+      cwaLinkedBuoyStationId: draft.cwaLinkedBuoyStationId,
+      cwaLinkedBuoyStationNameZh: draft.cwaLinkedBuoyStationNameZh,
+      cwaLinkedStationId: draft.cwaLinkedStationId,
+      cwaLinkedStationNameZh: draft.cwaLinkedStationNameZh,
     );
-    await _persist();
-    _emitSpots();
+
+    await _db
+        .collection("spots")
+        .doc(id)
+        .set(
+          spot.toCreateMap(
+            userId: userId,
+            entryKind: entryKind,
+            moderationStatus: moderationStatus,
+          ),
+        )
+        .timeout(const Duration(seconds: 20));
     return id;
   }
 
   Future<void> attachPhotoUrls(String spotId, List<String> urls) async {
-    await _ensureLoaded();
     if (urls.isEmpty) return;
-    final idx = _spots.indexWhere((s) => s.id == spotId);
-    if (idx < 0) return;
-    final s = _spots[idx];
-    _spots[idx] = FishingSpot(
-      id: s.id,
-      lat: s.lat,
-      lng: s.lng,
-      name: s.name,
-      description: s.description,
-      userId: s.userId,
-      photoUrls: [...s.photoUrls, ...urls],
-      createdAt: s.createdAt,
-      categoryId: s.categoryId,
-      environmentAtPost: s.environmentAtPost,
-      fishingAt: s.fishingAt,
-      cwaLinkedTideStationId: s.cwaLinkedTideStationId,
-      cwaLinkedTideStationNameZh: s.cwaLinkedTideStationNameZh,
-      cwaLinkedBuoyStationId: s.cwaLinkedBuoyStationId,
-      cwaLinkedBuoyStationNameZh: s.cwaLinkedBuoyStationNameZh,
-      cwaLinkedStationId: s.cwaLinkedStationId,
-      cwaLinkedStationNameZh: s.cwaLinkedStationNameZh,
-    );
-    await _persist();
-    _emitSpots();
+    final ref = _db.collection("spots").doc(spotId);
+    await _db.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      final data = snap.data();
+      final current = <String>[];
+      final raw = data?["photoUrls"];
+      if (raw is List) {
+        for (final e in raw) {
+          if (e is String) current.add(e);
+        }
+      }
+      tx.update(ref, {"photoUrls": [...current, ...urls]});
+    });
   }
 
   Future<void> setEnvironmentAtPost(
     String spotId,
     SpotEnvironmentSnapshot snapshot,
   ) async {
-    await _ensureLoaded();
-    final idx = _spots.indexWhere((s) => s.id == spotId);
-    if (idx < 0) return;
-    final s = _spots[idx];
-    _spots[idx] = FishingSpot(
-      id: s.id,
-      lat: s.lat,
-      lng: s.lng,
-      name: s.name,
-      description: s.description,
-      userId: s.userId,
-      photoUrls: s.photoUrls,
-      createdAt: s.createdAt,
-      categoryId: s.categoryId,
-      environmentAtPost: snapshot,
-      fishingAt: s.fishingAt,
-      cwaLinkedTideStationId: s.cwaLinkedTideStationId,
-      cwaLinkedTideStationNameZh: s.cwaLinkedTideStationNameZh,
-      cwaLinkedBuoyStationId: s.cwaLinkedBuoyStationId,
-      cwaLinkedBuoyStationNameZh: s.cwaLinkedBuoyStationNameZh,
-      cwaLinkedStationId: s.cwaLinkedStationId,
-      cwaLinkedStationNameZh: s.cwaLinkedStationNameZh,
-    );
-    await _persist();
-    _emitSpots();
+    await _db.collection("spots").doc(spotId).update({
+      "environmentAtPost": snapshot.toJson(),
+    });
   }
 
-  /// 於擷取海象前寫入最近潮位站／浮標代號（避免 API 失敗時仍無綁定紀錄）。
   Future<void> setCwaTideBuoyStationLinks(
     String spotId, {
     String? tideStationId,
@@ -153,31 +168,17 @@ class SpotRepository {
     String? buoyStationId,
     String? buoyStationNameZh,
   }) async {
-    await _ensureLoaded();
-    final idx = _spots.indexWhere((s) => s.id == spotId);
-    if (idx < 0) return;
-    final s = _spots[idx];
-    _spots[idx] = FishingSpot(
-      id: s.id,
-      lat: s.lat,
-      lng: s.lng,
-      name: s.name,
-      description: s.description,
-      userId: s.userId,
-      photoUrls: s.photoUrls,
-      createdAt: s.createdAt,
-      categoryId: s.categoryId,
-      environmentAtPost: s.environmentAtPost,
-      fishingAt: s.fishingAt,
-      cwaLinkedTideStationId: tideStationId ?? s.cwaLinkedTideStationId,
-      cwaLinkedTideStationNameZh: tideStationNameZh ?? s.cwaLinkedTideStationNameZh,
-      cwaLinkedBuoyStationId: buoyStationId ?? s.cwaLinkedBuoyStationId,
-      cwaLinkedBuoyStationNameZh: buoyStationNameZh ?? s.cwaLinkedBuoyStationNameZh,
-      cwaLinkedStationId: s.cwaLinkedStationId,
-      cwaLinkedStationNameZh: s.cwaLinkedStationNameZh,
-    );
-    await _persist();
-    _emitSpots();
+    final u = <String, dynamic>{};
+    if (tideStationId != null) u["cwaLinkedTideStationId"] = tideStationId;
+    if (tideStationNameZh != null) {
+      u["cwaLinkedTideStationNameZh"] = tideStationNameZh;
+    }
+    if (buoyStationId != null) u["cwaLinkedBuoyStationId"] = buoyStationId;
+    if (buoyStationNameZh != null) {
+      u["cwaLinkedBuoyStationNameZh"] = buoyStationNameZh;
+    }
+    if (u.isEmpty) return;
+    await _db.collection("spots").doc(spotId).update(u);
   }
 
   Future<String> uploadSpotPhoto({
@@ -189,14 +190,14 @@ class SpotRepository {
     return "data:$mime;base64,$b64";
   }
 
-  Stream<List<SpotComment>> watchComments(String spotId) async* {
-    await _ensureLoaded();
-    _commentCtrls.putIfAbsent(
-      spotId,
-      () => StreamController<List<SpotComment>>.broadcast(),
-    );
-    yield _sortedComments(_commentsBySpot[spotId] ?? const []);
-    yield* _commentCtrls[spotId]!.stream;
+  Stream<List<SpotComment>> watchComments(String spotId) {
+    return _db
+        .collection("spots")
+        .doc(spotId)
+        .collection("comments")
+        .orderBy("createdAt", descending: true)
+        .snapshots()
+        .map((snap) => snap.docs.map(SpotComment.fromDoc).toList(growable: false));
   }
 
   Future<void> addComment({
@@ -205,208 +206,119 @@ class SpotRepository {
     required String userId,
     required String authorLabel,
   }) async {
-    await _ensureLoaded();
-    final list = _commentsBySpot.putIfAbsent(spotId, () => []);
-    list.add(
-      SpotComment(
-        id: _uuid.v4(),
-        text: comment.text,
-        userId: userId,
-        authorLabel: authorLabel,
-        createdAt: DateTime.now(),
-      ),
-    );
-    await _persist();
-    _emitComments(spotId);
+    await _db
+        .collection("spots")
+        .doc(spotId)
+        .collection("comments")
+        .add(comment.toCreateMap(userId: userId, authorLabel: authorLabel));
   }
 
-  /// 僅留言作者或管理員可刪除（由呼叫端傳入 [requesterIsAdmin]，本機儲存仍應在正式上線時改由後端驗證）。
+  Future<FishingSpot> updateSpot({
+    required FishingSpot spot,
+    required String requesterUserId,
+    required bool requesterIsAdmin,
+    required String name,
+    required String description,
+    required List<String> categoryIds,
+    required double lat,
+    required double lng,
+    DateTime? fishingAt,
+  }) async {
+    final isAuthor = spot.userId == requesterUserId;
+    if (!isAuthor && !requesterIsAdmin) {
+      throw StateError("僅作者或管理員可編輯釣點");
+    }
+
+    final updated = FishingSpot(
+      id: spot.id,
+      lat: lat,
+      lng: lng,
+      name: name,
+      description: description,
+      userId: spot.userId,
+      photoUrls: spot.photoUrls,
+      createdAt: spot.createdAt,
+      categoryIds: categoryIds,
+      entryKind: spot.entryKind,
+      moderationStatus: spot.moderationStatus,
+      environmentAtPost: spot.environmentAtPost,
+      fishingAt: fishingAt,
+      cwaLinkedTideStationId: spot.cwaLinkedTideStationId,
+      cwaLinkedTideStationNameZh: spot.cwaLinkedTideStationNameZh,
+      cwaLinkedBuoyStationId: spot.cwaLinkedBuoyStationId,
+      cwaLinkedBuoyStationNameZh: spot.cwaLinkedBuoyStationNameZh,
+      cwaLinkedStationId: spot.cwaLinkedStationId,
+      cwaLinkedStationNameZh: spot.cwaLinkedStationNameZh,
+    );
+
+    await _db
+        .collection("spots")
+        .doc(spot.id)
+        .update(updated.toFirestoreUpdatePayload())
+        .timeout(const Duration(seconds: 20));
+    return updated;
+  }
+
+  Future<void> deleteSpot({
+    required String spotId,
+    required String requesterUserId,
+    required bool requesterIsAdmin,
+  }) async {
+    final doc = await _db.collection("spots").doc(spotId).get();
+    final data = doc.data();
+    if (data == null) return;
+    final owner = (data["userId"] as String?) ?? "";
+    if (owner != requesterUserId && !requesterIsAdmin) {
+      throw StateError("僅作者或管理員可刪除釣點");
+    }
+
+    final comments = await _db
+        .collection("spots")
+        .doc(spotId)
+        .collection("comments")
+        .get();
+    final batch = _db.batch();
+    for (final c in comments.docs) {
+      batch.delete(c.reference);
+    }
+    batch.delete(_db.collection("spots").doc(spotId));
+    await batch.commit();
+  }
+
   Future<void> deleteComment({
     required String spotId,
     required String commentId,
     required String requesterUserId,
     required bool requesterIsAdmin,
   }) async {
-    await _ensureLoaded();
-    final list = _commentsBySpot[spotId];
-    if (list == null) return;
-    final idx = list.indexWhere((c) => c.id == commentId);
-    if (idx < 0) return;
-    final target = list[idx];
-    final isAuthor = target.userId == requesterUserId;
-    if (!isAuthor && !requesterIsAdmin) {
+    final ref = _db
+        .collection("spots")
+        .doc(spotId)
+        .collection("comments")
+        .doc(commentId);
+    final doc = await ref.get();
+    final data = doc.data();
+    if (data == null) return;
+    final owner = (data["userId"] as String?) ?? "";
+    if (owner != requesterUserId && !requesterIsAdmin) {
       throw StateError("僅能刪除自己的留言，或由管理員刪除");
     }
-    list.removeAt(idx);
-    await _persist();
-    _emitComments(spotId);
+    await ref.delete();
   }
 
   Future<void> _ensureLoaded() async {
     if (_loaded) return;
-    final prefs = await SharedPreferences.getInstance();
-
-    final spotsRaw = prefs.getString(_spotsKey);
-    if (spotsRaw != null && spotsRaw.isNotEmpty) {
-      final decoded = jsonDecode(spotsRaw);
-      if (decoded is List) {
-        _spots
-          ..clear()
-          ..addAll(
-            decoded.whereType<Map>().map((m) {
-              final map = Map<String, dynamic>.from(m);
-              final rawCat = map["categoryId"] as String?;
-              return FishingSpot(
-                id: map["id"] as String? ?? "",
-                lat: (map["lat"] as num?)?.toDouble() ?? 0,
-                lng: (map["lng"] as num?)?.toDouble() ?? 0,
-                name: map["name"] as String? ?? "未命名釣點",
-                description: map["description"] as String? ?? "",
-                userId: map["userId"] as String? ?? "",
-                photoUrls: (map["photoUrls"] as List?)
-                        ?.whereType<String>()
-                        .toList(growable: false) ??
-                    const [],
-                createdAt: DateTime.tryParse(map["createdAt"] as String? ?? "") ??
-                    DateTime.now(),
-                categoryId:
-                    spotCategoryById(rawCat)?.id ?? kDefaultSpotCategoryId,
-                environmentAtPost: () {
-                  final e = map["environmentAtPost"];
-                  if (e is Map<String, dynamic>) {
-                    return SpotEnvironmentSnapshot.fromJson(e);
-                  }
-                  if (e is Map) {
-                    return SpotEnvironmentSnapshot.fromJson(
-                      Map<String, dynamic>.from(e),
-                    );
-                  }
-                  return null;
-                }(),
-                fishingAt: () {
-                  final raw = map["fishingAt"] as String?;
-                  if (raw == null || raw.isEmpty) return null;
-                  return DateTime.tryParse(raw);
-                }(),
-                cwaLinkedTideStationId: _trimOrNullDisk(map["cwaLinkedTideStationId"]) ??
-                    _trimOrNullDisk(map["cwaLinkedStationId"]),
-                cwaLinkedTideStationNameZh:
-                    _trimOrNullDisk(map["cwaLinkedTideStationNameZh"]) ??
-                        _trimOrNullDisk(map["cwaLinkedStationNameZh"]),
-                cwaLinkedBuoyStationId: _trimOrNullDisk(map["cwaLinkedBuoyStationId"]),
-                cwaLinkedBuoyStationNameZh:
-                    _trimOrNullDisk(map["cwaLinkedBuoyStationNameZh"]),
-                cwaLinkedStationId: _trimOrNullDisk(map["cwaLinkedStationId"]),
-                cwaLinkedStationNameZh: _trimOrNullDisk(map["cwaLinkedStationNameZh"]),
-              );
-            }),
-          );
-      }
+    final snap = await _db.collection("spots").get();
+    final next = <FishingSpot>[];
+    for (final doc in snap.docs) {
+      try {
+        next.add(FishingSpot.fromDoc(doc));
+      } catch (_) {}
     }
-
-    final commentsRaw = prefs.getString(_commentsKey);
-    if (commentsRaw != null && commentsRaw.isNotEmpty) {
-      final decoded = jsonDecode(commentsRaw);
-      if (decoded is Map) {
-        _commentsBySpot.clear();
-        for (final entry in decoded.entries) {
-          final key = entry.key.toString();
-          final value = entry.value;
-          if (value is! List) continue;
-          _commentsBySpot[key] = value.whereType<Map>().map((m) {
-            final map = Map<String, dynamic>.from(m);
-            return SpotComment(
-              id: map["id"] as String? ?? "",
-              text: map["text"] as String? ?? "",
-              userId: map["userId"] as String? ?? "",
-              authorLabel: map["authorLabel"] as String? ?? "匿名",
-              createdAt:
-                  DateTime.tryParse(map["createdAt"] as String? ?? "") ?? DateTime.now(),
-            );
-          }).toList(growable: true);
-        }
-      }
-    }
-
+    next.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _spots
+      ..clear()
+      ..addAll(next);
     _loaded = true;
-  }
-
-  Future<void> _persist() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _spotsKey,
-      jsonEncode([
-        for (final s in _spots)
-          {
-            "id": s.id,
-            "lat": s.lat,
-            "lng": s.lng,
-            "name": s.name,
-            "description": s.description,
-            "userId": s.userId,
-            "photoUrls": s.photoUrls,
-            "categoryId": s.categoryId,
-            if (s.environmentAtPost != null)
-              "environmentAtPost": s.environmentAtPost!.toJson(),
-            if (s.fishingAt != null)
-              "fishingAt": s.fishingAt!.toUtc().toIso8601String(),
-            if (s.cwaLinkedTideStationId != null)
-              "cwaLinkedTideStationId": s.cwaLinkedTideStationId,
-            if (s.cwaLinkedTideStationNameZh != null)
-              "cwaLinkedTideStationNameZh": s.cwaLinkedTideStationNameZh,
-            if (s.cwaLinkedBuoyStationId != null)
-              "cwaLinkedBuoyStationId": s.cwaLinkedBuoyStationId,
-            if (s.cwaLinkedBuoyStationNameZh != null)
-              "cwaLinkedBuoyStationNameZh": s.cwaLinkedBuoyStationNameZh,
-            if (s.cwaLinkedStationId != null)
-              "cwaLinkedStationId": s.cwaLinkedStationId,
-            if (s.cwaLinkedStationNameZh != null)
-              "cwaLinkedStationNameZh": s.cwaLinkedStationNameZh,
-            "createdAt": s.createdAt.toIso8601String(),
-          },
-      ]),
-    );
-    await prefs.setString(
-      _commentsKey,
-      jsonEncode({
-        for (final e in _commentsBySpot.entries)
-          e.key: [
-            for (final c in e.value)
-              {
-                "id": c.id,
-                "text": c.text,
-                "userId": c.userId,
-                "authorLabel": c.authorLabel,
-                "createdAt": c.createdAt.toIso8601String(),
-              },
-          ],
-      }),
-    );
-  }
-
-  List<FishingSpot> _sortedSpots(List<FishingSpot> items) {
-    final copy = [...items];
-    copy.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return copy;
-  }
-
-  List<SpotComment> _sortedComments(List<SpotComment> items) {
-    final copy = [...items];
-    copy.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return copy;
-  }
-
-  void _emitSpots() {
-    if (_spotsCtrl.isClosed) return;
-    _spotsCtrl.add(_sortedSpots(_spots));
-  }
-
-  void _emitComments(String spotId) {
-    final ctrl = _commentCtrls.putIfAbsent(
-      spotId,
-      () => StreamController<List<SpotComment>>.broadcast(),
-    );
-    if (ctrl.isClosed) return;
-    ctrl.add(_sortedComments(_commentsBySpot[spotId] ?? const []));
   }
 }

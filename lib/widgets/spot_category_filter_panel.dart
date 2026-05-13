@@ -132,7 +132,7 @@ class SpotCategoryFilterPanel extends StatelessWidget {
                 value: showOceanCurrent,
                 onChanged: (v) => onShowOceanCurrentChanged(v ?? false),
                 title: Text(
-                  "海流（Copernicus）",
+                  "海流（Beta）",
                   style: theme.textTheme.bodyMedium,
                 ),
                 secondary: Icon(

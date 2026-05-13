@@ -4,6 +4,9 @@
 # 對 nrt.cmems-du.eu 直連 OPeNDAP 可能收到非 NetCDF 的 HTML。
 # 請在 Repository secrets 設定：
 #   CMEMS_USER、CMEMS_PASSWORD — Copernicus Marine 帳密（傳給 copernicusmarine；並寫入 ~/.netrc 供備援）
+#   FIREBASE_STORAGE_UPLOADER_SA_JSON（選用）— GCP 服務帳號 JSON，需具備本專案 Storage 物件寫入權限；
+#     若設定，匯出後會上傳至 Firebase Storage `ocean/copernicus_ocean_vectors.json`，
+#     供 App 執行期 GET（見 `lib/config/ocean_vectors_remote_url.dart`）。未設定則略過上傳。
 #
 # 排程：每日 18:00 UTC（可改 cron）。亦可於 Actions 分頁手動執行「Run workflow」。
 
@@ -59,6 +62,40 @@ jobs:
             exit 1
           fi
           python tool/export_copernicus_ocean_vectors.py
+
+      # 未設 secret 時下面「Auth / gsutil / Upload」三步會顯示 Skipped，Firebase 仍會是空的——整個 job 仍可能綠燈。
+      - name: "提示：Firebase Storage 上傳（可選）"
+        if: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON == '' }}
+        run: |
+          echo "::notice::未設定 Repository secret「FIREBASE_STORAGE_UPLOADER_SA_JSON」— 已跳過上傳。"
+          echo "::notice::Firebase Console 的 fishing-web-ab5ad.firebasestorage.app 不會出現 ocean/ 檔案屬正常。"
+          echo "::notice::請到 Settings → Secrets and variables → Actions 新增同名 secret（GCP 服務帳號 JSON 全文）。"
+
+      - name: Auth Google Cloud (Firebase Storage uploader)
+        if: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON }}
+
+      - name: Set up gcloud SDK
+        if: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: fishing-web-ab5ad
+
+      - name: Upload ocean vectors to Firebase Storage
+        if: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
+        run: |
+          set -e
+          DEST="gs://fishing-web-ab5ad.firebasestorage.app/ocean/copernicus_ocean_vectors.json"
+          test -f "assets/data/copernicus_ocean_vectors.json"
+          ls -la "assets/data/copernicus_ocean_vectors.json"
+          gsutil -h "Content-Type:application/json" \
+            -h "Cache-Control:public, max-age=600" \
+            cp "assets/data/copernicus_ocean_vectors.json" \
+            "${DEST}"
+          echo "Uploaded to ${DEST}"
+          gsutil ls -l "gs://fishing-web-ab5ad.firebasestorage.app/ocean/"
 
       - name: Commit and push if changed
         run: |

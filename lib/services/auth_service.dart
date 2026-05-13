@@ -79,6 +79,33 @@ class AuthService {
     await _auth.signOut();
   }
 
+  /// 更新 Firebase Auth 的顯示名稱與頭像 URL（頭像須為可用的 http/https 圖片連結）。
+  /// 空字串的 [photoUrl] 表示清除頭像網址。
+  Future<void> updateUserProfile({
+    required String displayName,
+    String? photoUrl,
+  }) async {
+    final u = _auth.currentUser;
+    if (u == null) {
+      throw StateError("未登入");
+    }
+    final name = displayName.trim();
+    await u.updateDisplayName(name.isEmpty ? null : name);
+    final pu = photoUrl?.trim();
+    if (pu != null && pu.isNotEmpty) {
+      final uri = Uri.tryParse(pu);
+      if (uri == null ||
+          !uri.hasScheme ||
+          (uri.scheme != "http" && uri.scheme != "https")) {
+        throw ArgumentError("頭像連結須為有效的 http 或 https 網址");
+      }
+      await u.updatePhotoURL(pu);
+    } else {
+      await u.updatePhotoURL(null);
+    }
+    await u.reload();
+  }
+
   Future<bool> isCurrentUserAdmin() async {
     return _hasAdminClaim(_auth.currentUser);
   }

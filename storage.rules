@@ -1,6 +1,12 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
+    // CI 上傳之海流向量（匿名讀、禁止客戶端寫入）。
+    match /ocean/{fileName} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     match /spots/{spotId}/{fileName} {
       allow read: if true;
       allow write: if request.auth != null;

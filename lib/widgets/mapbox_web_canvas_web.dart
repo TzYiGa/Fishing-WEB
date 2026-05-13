@@ -221,6 +221,8 @@ class _MapboxWebCanvasState extends State<MapboxWebCanvas> {
           "lat": s.lat,
           "lng": s.lng,
           "category": s.categoryId,
+          "entryKind": s.entryKind.firestoreValue,
+          "categoryIds": s.categoryIds,
         },
     ]);
   }

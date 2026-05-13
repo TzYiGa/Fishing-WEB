@@ -4,6 +4,8 @@ import "dart:typed_data";
 import "package:fishing_map/models/fishing_spot.dart";
 import "package:fishing_map/models/map_view_settings.dart";
 import "package:fishing_map/models/spot_category.dart";
+import "package:fishing_map/models/spot_entry_kind.dart";
+import "package:fishing_map/models/spot_moderation_status.dart";
 import "package:fishing_map/data/cwa_station_loader.dart";
 import "package:fishing_map/data/cwa_station_nearest.dart";
 import "package:fishing_map/models/cwa_station_kind.dart";
@@ -16,16 +18,37 @@ import "package:flutter/material.dart";
 import "package:image_picker/image_picker.dart";
 import "package:latlong2/latlong.dart";
 
-/// 新增釣點表單字串（對應地圖標籤語言）。
+/// [AddSpotSheet.open] 成功關閉時回傳。
+enum AddSpotSheetOutcome {
+  /// 釣況分享已上地圖。
+  conditionSharePublished,
+
+  /// 固定釣點：待審核。
+  fishingPoiSubmittedPending,
+
+  /// 固定釣點：管理員直接核准上地圖。
+  fishingPoiPublishedApproved,
+}
+
+/// 釣況分享／固定釣點表單字串（對應地圖標籤語言）。
 class _AddSpotCopy {
   const _AddSpotCopy(this.lang);
   final MapLabelLanguage lang;
 
-  String get sheetTitle => switch (lang) {
-        MapLabelLanguage.english => "Add fishing spot",
-        MapLabelLanguage.simplifiedChinese => "新增钓点",
-        MapLabelLanguage.traditionalChinese => "新增釣點",
+  String sheetTitle(SpotEntryKind kind) {
+    if (kind == SpotEntryKind.conditionShare) {
+      return switch (lang) {
+        MapLabelLanguage.english => "Share fishing conditions",
+        MapLabelLanguage.simplifiedChinese => "分享钓况",
+        MapLabelLanguage.traditionalChinese => "釣況分享",
       };
+    }
+    return switch (lang) {
+      MapLabelLanguage.english => "Add fishing spot (map POI)",
+      MapLabelLanguage.simplifiedChinese => "新增固定钓点",
+      MapLabelLanguage.traditionalChinese => "新增固定釣點",
+    };
+  }
 
   String coordsLine(String lat, String lng) => switch (lang) {
         MapLabelLanguage.english => "Approx. coordinates: $lat, $lng",
@@ -33,26 +56,20 @@ class _AddSpotCopy {
         MapLabelLanguage.traditionalChinese => "座標約：$lat, $lng",
       };
 
-  String get outingTitle => switch (lang) {
-        MapLabelLanguage.english => "Trip date & time",
-        MapLabelLanguage.simplifiedChinese => "出钓日期与时间",
-        MapLabelLanguage.traditionalChinese => "出釣日期與時間",
+  String spotNameLabel(SpotEntryKind kind) {
+    if (kind == SpotEntryKind.conditionShare) {
+      return switch (lang) {
+        MapLabelLanguage.english => "Share title",
+        MapLabelLanguage.simplifiedChinese => "分享标题",
+        MapLabelLanguage.traditionalChinese => "分享標題",
       };
-
-  String get outingHint => switch (lang) {
-        MapLabelLanguage.english =>
-          "Sea-state prefers CWA O-B0075-002 (falls back to 001) at this moment when authorized and inside Taiwan bounds.",
-        MapLabelLanguage.simplifiedChinese =>
-          "海象快照依此时间，优先中央气象局 O-B0075-002、必要时 001（须授权且坐标在台澎金马范围内）。",
-        MapLabelLanguage.traditionalChinese =>
-          "海象快照會依此時間，優先中央氣象署 O-B0075-002、必要時改採 001（須授權且座標在臺澎金馬範圍內）。",
-      };
-
-  String get spotNameLabel => switch (lang) {
-        MapLabelLanguage.english => "Spot name",
-        MapLabelLanguage.simplifiedChinese => "钓点名称",
-        MapLabelLanguage.traditionalChinese => "釣點名稱",
-      };
+    }
+    return switch (lang) {
+      MapLabelLanguage.english => "Spot name",
+      MapLabelLanguage.simplifiedChinese => "钓点名称",
+      MapLabelLanguage.traditionalChinese => "釣點名稱",
+    };
+  }
 
   String get spotTypeTitle => switch (lang) {
         MapLabelLanguage.english => "Venue type",
@@ -95,23 +112,62 @@ class _AddSpotCopy {
         MapLabelLanguage.traditionalChinese => "發布",
       };
 
+  String get publishSubmitReview => switch (lang) {
+        MapLabelLanguage.english => "Submit for review",
+        MapLabelLanguage.simplifiedChinese => "提交审核",
+        MapLabelLanguage.traditionalChinese => "提交審核",
+      };
+
+  String get publishAsAdmin => switch (lang) {
+        MapLabelLanguage.english => "Publish (skip review)",
+        MapLabelLanguage.simplifiedChinese => "直接发布（管理员）",
+        MapLabelLanguage.traditionalChinese => "立即發布（管理員）",
+      };
+
+  String get moderationHintPoiMember => switch (lang) {
+        MapLabelLanguage.english =>
+          "This map POI stays hidden until an admin approves it.",
+        MapLabelLanguage.simplifiedChinese =>
+          "固定钓点需管理员审核通过后才会显示在地图上。",
+        MapLabelLanguage.traditionalChinese =>
+          "固定釣點須經管理員審核通過後，才會顯示於公開地圖。",
+      };
+
   String get errLogin => switch (lang) {
         MapLabelLanguage.english => "Please sign in first",
         MapLabelLanguage.simplifiedChinese => "请先登录",
         MapLabelLanguage.traditionalChinese => "請先登入",
       };
 
-  String get errName => switch (lang) {
-        MapLabelLanguage.english => "Enter a spot name",
-        MapLabelLanguage.simplifiedChinese => "请输入钓点名称",
-        MapLabelLanguage.traditionalChinese => "請輸入釣點名稱",
+  String errName(SpotEntryKind kind) {
+    if (kind == SpotEntryKind.conditionShare) {
+      return switch (lang) {
+        MapLabelLanguage.english => "Enter a title",
+        MapLabelLanguage.simplifiedChinese => "请输入标题",
+        MapLabelLanguage.traditionalChinese => "請輸入標題",
       };
+    }
+    return switch (lang) {
+      MapLabelLanguage.english => "Enter a spot name",
+      MapLabelLanguage.simplifiedChinese => "请输入钓点名称",
+      MapLabelLanguage.traditionalChinese => "請輸入釣點名稱",
+    };
+  }
 
-  String get statusCreating => switch (lang) {
-        MapLabelLanguage.english => "Creating spot…",
-        MapLabelLanguage.simplifiedChinese => "正在建立钓点…",
-        MapLabelLanguage.traditionalChinese => "正在建立釣點...",
+  String statusCreating(SpotEntryKind kind) {
+    if (kind == SpotEntryKind.conditionShare) {
+      return switch (lang) {
+        MapLabelLanguage.english => "Publishing…",
+        MapLabelLanguage.simplifiedChinese => "正在发布…",
+        MapLabelLanguage.traditionalChinese => "正在發布分享...",
       };
+    }
+    return switch (lang) {
+      MapLabelLanguage.english => "Creating spot…",
+      MapLabelLanguage.simplifiedChinese => "正在建立钓点…",
+      MapLabelLanguage.traditionalChinese => "正在建立固定釣點...",
+    };
+  }
 
   String statusUploading(int i, int n) => switch (lang) {
         MapLabelLanguage.english => "Uploading photo $i/$n…",
@@ -141,35 +197,6 @@ class _AddSpotCopy {
       };
 }
 
-String _formatOutingButtonLabel(DateTime d, MapLabelLanguage lang) {
-  final x = d.toLocal();
-  switch (lang) {
-    case MapLabelLanguage.english:
-      const mon = [
-        "Jan",
-        "Feb",
-        "Mar",
-        "Apr",
-        "May",
-        "Jun",
-        "Jul",
-        "Aug",
-        "Sep",
-        "Oct",
-        "Nov",
-        "Dec",
-      ];
-      final h = x.hour.toString().padLeft(2, "0");
-      final m = x.minute.toString().padLeft(2, "0");
-      return "${mon[x.month - 1]} ${x.day}, ${x.year}, $h:$m";
-    case MapLabelLanguage.simplifiedChinese:
-    case MapLabelLanguage.traditionalChinese:
-      return "${x.year}/${x.month}/${x.day} "
-          "${x.hour.toString().padLeft(2, "0")}:"
-          "${x.minute.toString().padLeft(2, "0")}";
-  }
-}
-
 class AddSpotSheet extends StatefulWidget {
   const AddSpotSheet({
     super.key,
@@ -177,22 +204,25 @@ class AddSpotSheet extends StatefulWidget {
     required this.repo,
     required this.auth,
     required this.mapLanguage,
+    required this.entryKind,
   });
 
   final LatLng pick;
   final SpotRepository repo;
   final AuthService auth;
   final MapLabelLanguage mapLanguage;
+  final SpotEntryKind entryKind;
 
-  static Future<bool?> open(
+  static Future<AddSpotSheetOutcome?> open(
     BuildContext context, {
     required LatLng pick,
     required SpotRepository repo,
     required AuthService auth,
     required MapLabelLanguage mapLanguage,
+    required SpotEntryKind entryKind,
   }) {
     pushMapboxInteractionBlock();
-    return showModalBottomSheet<bool>(
+    return showModalBottomSheet<AddSpotSheetOutcome>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
@@ -206,6 +236,7 @@ class AddSpotSheet extends StatefulWidget {
           repo: repo,
           auth: auth,
           mapLanguage: mapLanguage,
+          entryKind: entryKind,
         ),
       ),
     ).whenComplete(popMapboxInteractionBlock);
@@ -223,14 +254,31 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
   String? _error;
   String? _status;
   final List<({Uint8List bytes, String mime})> _images = [];
-  String _categoryId = kDefaultSpotCategoryId;
-
-  /// 使用者填寫的出釣日時；氣象快照依此時段擷取。
-  DateTime _fishingAt = DateTime.now();
+  final Set<String> _selectedCategoryIds = {kDefaultSpotCategoryId};
+  bool _isAdmin = false;
+  bool _adminResolved = false;
 
   _AddSpotCopy get _txt => _AddSpotCopy(widget.mapLanguage);
 
-  Locale get _locale => widget.mapLanguage.materialLocale;
+  @override
+  void initState() {
+    super.initState();
+    if (widget.entryKind == SpotEntryKind.fishingPoi) {
+      unawaited(_resolveAdmin());
+    } else {
+      _adminResolved = true;
+      _isAdmin = false;
+    }
+  }
+
+  Future<void> _resolveAdmin() async {
+    final v = await widget.auth.isCurrentUserAdmin();
+    if (!mounted) return;
+    setState(() {
+      _isAdmin = v;
+      _adminResolved = true;
+    });
+  }
 
   @override
   void dispose() {
@@ -307,36 +355,16 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
     }
   }
 
-  Future<void> _pickFishingWhen() async {
-    if (_busy) return;
-    final first = DateTime(2020, 1, 1);
-    final last = DateTime.now().add(const Duration(days: 400));
-    DateTime clamp(DateTime x) {
-      if (x.isBefore(first)) return first;
-      if (x.isAfter(last)) return last;
-      return x;
-    }
-
-    final d = await showDatePicker(
-      context: context,
-      locale: _locale,
-      initialDate: clamp(_fishingAt),
-      firstDate: first,
-      lastDate: last,
-    );
-    if (d == null || !mounted) return;
-    final t = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay.fromDateTime(_fishingAt),
-      builder: (ctx, child) => Localizations.override(
-        context: ctx,
-        locale: _locale,
-        child: child!,
-      ),
-    );
-    if (t == null || !mounted) return;
+  void _toggleCategory(String id, bool selected) {
     setState(() {
-      _fishingAt = DateTime(d.year, d.month, d.day, t.hour, t.minute);
+      if (selected) {
+        _selectedCategoryIds.add(id);
+      } else {
+        _selectedCategoryIds.remove(id);
+        if (_selectedCategoryIds.isEmpty) {
+          _selectedCategoryIds.add(kDefaultSpotCategoryId);
+        }
+      }
     });
   }
 
@@ -349,16 +377,23 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
     }
     final name = _name.text.trim();
     if (name.isEmpty) {
-      setState(() => _error = t.errName);
+      setState(() => _error = t.errName(widget.entryKind));
       return;
     }
     setState(() {
       _busy = true;
       _error = null;
-      _status = t.statusCreating;
+      _status = t.statusCreating(widget.entryKind);
     });
 
     try {
+      final isAdmin = await widget.auth.isCurrentUserAdmin();
+      final kind = widget.entryKind;
+      final SpotModerationStatus mod = kind == SpotEntryKind.conditionShare
+          ? SpotModerationStatus.approved
+          : (isAdmin
+              ? SpotModerationStatus.approved
+              : SpotModerationStatus.pending);
       final draft = FishingSpot(
         id: "",
         lat: widget.pick.latitude,
@@ -368,11 +403,17 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
         userId: u.uid,
         photoUrls: const [],
         createdAt: DateTime.now(),
-        categoryId: _categoryId,
-        fishingAt: _fishingAt,
+        categoryIds: normalizeCategoryIds(_selectedCategoryIds),
+        entryKind: kind,
+        moderationStatus: mod,
       );
       final id = await widget.repo
-          .createDraftSpot(draft: draft, userId: u.uid)
+          .createDraftSpot(
+            draft: draft,
+            userId: u.uid,
+            entryKind: kind,
+            moderationStatus: mod,
+          )
           .timeout(const Duration(seconds: 20));
       final urls = <String>[];
       for (var i = 0; i < _images.length; i++) {
@@ -394,7 +435,7 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
       final spotId = id;
       final lat = widget.pick.latitude;
       final lng = widget.pick.longitude;
-      final when = _fishingAt;
+      final when = DateTime.now();
       final repo = widget.repo;
 
       if (!mounted) return;
@@ -402,7 +443,12 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
         _busy = false;
         _status = null;
       });
-      Navigator.of(context).pop(true);
+      final AddSpotSheetOutcome outcome = kind == SpotEntryKind.conditionShare
+          ? AddSpotSheetOutcome.conditionSharePublished
+          : (isAdmin
+              ? AddSpotSheetOutcome.fishingPoiPublishedApproved
+              : AddSpotSheetOutcome.fishingPoiSubmittedPending);
+      Navigator.of(context).pop(outcome);
       unawaited(
         _syncEnvironmentAfterCreate(
           repo: repo,
@@ -447,7 +493,7 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            t.sheetTitle,
+            t.sheetTitle(widget.entryKind),
             style:
                 theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
           ),
@@ -459,32 +505,34 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
             ),
             style: theme.textTheme.bodySmall,
           ),
-          const SizedBox(height: 16),
-          Text(t.outingTitle, style: theme.textTheme.titleSmall),
-          const SizedBox(height: 6),
-          OutlinedButton.icon(
-            onPressed: _busy ? null : _pickFishingWhen,
-            icon: const Icon(Icons.event_outlined, size: 20),
-            label: Text(
-              _formatOutingButtonLabel(_fishingAt, widget.mapLanguage),
+          if (_adminResolved &&
+              !_isAdmin &&
+              widget.entryKind == SpotEntryKind.fishingPoi) ...[
+            const SizedBox(height: 8),
+            Text(
+              t.moderationHintPoiMember,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
-          ),
-          Text(
-            t.outingHint,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
+          ],
           const SizedBox(height: 16),
           TextField(
             controller: _name,
             decoration: InputDecoration(
-              labelText: t.spotNameLabel,
+              labelText: t.spotNameLabel(widget.entryKind),
               border: const OutlineInputBorder(),
             ),
           ),
           const SizedBox(height: 16),
           Text(t.spotTypeTitle, style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Text(
+            "可複選",
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
           const SizedBox(height: 8),
           Text(t.saltwater, style: theme.textTheme.labelLarge),
           const SizedBox(height: 6),
@@ -496,12 +544,10 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
                   in kSpotCategoryOptions.where((e) => e.id.startsWith("1-")))
                 FilterChip(
                   label: Text(o.sublabel),
-                  selected: _categoryId == o.id,
+                  selected: _selectedCategoryIds.contains(o.id),
                   onSelected: _busy
                       ? null
-                      : (v) {
-                          if (v) setState(() => _categoryId = o.id);
-                        },
+                      : (v) => _toggleCategory(o.id, v),
                 ),
             ],
           ),
@@ -516,12 +562,10 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
                   in kSpotCategoryOptions.where((e) => e.id.startsWith("2-")))
                 FilterChip(
                   label: Text(o.sublabel),
-                  selected: _categoryId == o.id,
+                  selected: _selectedCategoryIds.contains(o.id),
                   onSelected: _busy
                       ? null
-                      : (v) {
-                          if (v) setState(() => _categoryId = o.id);
-                        },
+                      : (v) => _toggleCategory(o.id, v),
                 ),
             ],
           ),
@@ -582,7 +626,15 @@ class _AddSpotSheetState extends State<AddSpotSheet> {
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : Text(t.publish),
+                : Text(
+                    widget.entryKind == SpotEntryKind.conditionShare
+                        ? t.publish
+                        : (_adminResolved
+                            ? (_isAdmin
+                                ? t.publishAsAdmin
+                                : t.publishSubmitReview)
+                            : t.publishSubmitReview),
+                  ),
           ),
         ],
       ),
