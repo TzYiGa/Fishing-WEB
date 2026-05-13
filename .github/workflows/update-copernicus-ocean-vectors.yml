@@ -27,6 +27,9 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-latest
+    # 在 job env 注入後，step 的 if 可用 env.* 判斷（避免部分環境在 if 內無法解析 secrets 上下文）。
+    env:
+      FIREBASE_STORAGE_UPLOADER_SA_JSON: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON }}
     steps:
       # 使用 Node 24 的 action 版本，避免 checkout@v4／setup-python@v5 的 Node 20 棄用警告
       - uses: actions/checkout@v6
@@ -65,26 +68,26 @@ jobs:
 
       # 未設 secret 時下面「Auth / gsutil / Upload」三步會顯示 Skipped，Firebase 仍會是空的——整個 job 仍可能綠燈。
       - name: "提示：Firebase Storage 上傳（可選）"
-        if: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON == '' }}
+        if: ${{ env.FIREBASE_STORAGE_UPLOADER_SA_JSON == '' }}
         run: |
           echo "::notice::未設定 Repository secret「FIREBASE_STORAGE_UPLOADER_SA_JSON」— 已跳過上傳。"
           echo "::notice::Firebase Console 的 fishing-web-ab5ad.firebasestorage.app 不會出現 ocean/ 檔案屬正常。"
           echo "::notice::請到 Settings → Secrets and variables → Actions 新增同名 secret（GCP 服務帳號 JSON 全文）。"
 
       - name: Auth Google Cloud (Firebase Storage uploader)
-        if: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
+        if: ${{ env.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON }}
+          credentials_json: ${{ env.FIREBASE_STORAGE_UPLOADER_SA_JSON }}
 
       - name: Set up gcloud SDK
-        if: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
+        if: ${{ env.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: fishing-web-ab5ad
 
       - name: Upload ocean vectors to Firebase Storage
-        if: ${{ secrets.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
+        if: ${{ env.FIREBASE_STORAGE_UPLOADER_SA_JSON != '' }}
         run: |
           set -e
           DEST="gs://fishing-web-ab5ad.firebasestorage.app/ocean/copernicus_ocean_vectors.json"
